@@ -1,0 +1,14 @@
+{
+  "name": "gantry-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Gantry control plane: agents, environments, sessions, events, scheduled deployments.",
+  "scripts": {
+    "start": "node index.mjs",
+    "seed": "node seed.mjs --reset"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
