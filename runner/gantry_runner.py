@@ -49,24 +49,36 @@ def api(base, method, path, body=None):
         return json.loads(res.read())
 
 
-def post_events(base, session_id, events, attempts=3):
+class InterruptedSession(Exception):
+    """The console requested an interrupt mid-run."""
+
+
+def post_events(base, session_id, events, claim_token=None, attempts=3):
     """Post events with retries — a transient control-plane blip must not
     discard a completed gemini run."""
+    body = {"events": events}
+    if claim_token:
+        body["claim_token"] = claim_token
     last_err = None
     for attempt in range(attempts):
         try:
-            return api(base, "POST", f"/v1/internal/sessions/{session_id}/events", {"events": events})
+            return api(base, "POST", f"/v1/internal/sessions/{session_id}/events", body)
+        except urllib.error.HTTPError as err:
+            if err.code == 409:  # stale claim: another worker owns this session now
+                raise RuntimeError(f"claim for {session_id} was superseded; dropping events") from err
+            last_err = err
+            time.sleep(2 ** attempt)
         except Exception as err:  # noqa: BLE001 — sockets raise a zoo of types
             last_err = err
             time.sleep(2 ** attempt)
     raise RuntimeError(f"failed to post events for {session_id} after {attempts} attempts: {last_err}")
 
 
-def post_events_best_effort(base, session_id, events):
+def post_events_best_effort(base, session_id, events, claim_token=None):
     """For failure reporting: if the control plane is what's down, posting the
     failure will fail too — log instead of crashing the worker (double-fault)."""
     try:
-        post_events(base, session_id, events)
+        post_events(base, session_id, events, claim_token)
         return True
     except Exception as err:  # noqa: BLE001
         print(f"[runner] could not report events for {session_id}: {err}", file=sys.stderr)
@@ -86,23 +98,38 @@ def build_prompt(agent, events):
             f"{names}. Use the corresponding CLIs (snowsql, aws, gh) where needed."
         )
     for event in events:
-        text = "\n".join(
-            block.get("text", "")
-            for block in event.get("content", [])
-            if block.get("type") == "text"
-        )
+        if event.get("type") not in ("user.message", "agent.message"):
+            continue
+        # content may be null, a string, or a list with non-dict/non-text
+        # blocks — none of that may crash the worker (poison-pill session).
+        content = event.get("content")
+        if isinstance(content, str):
+            blocks = [{"type": "text", "text": content}]
+        elif isinstance(content, list):
+            blocks = [b for b in content if isinstance(b, dict)]
+        else:
+            blocks = []
+        text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        skipped = len(blocks) - sum(1 for b in blocks if b.get("type") == "text")
+        if skipped:
+            note = f"[{skipped} non-text content block(s) omitted by the harness]"
+            text = f"{text}\n{note}".strip()
         if not text:
             continue
         if event["type"] == "user.message":
             parts.append(f"<user>\n{text}\n</user>")
-        elif event["type"] == "agent.message":
+        else:
             parts.append(f"<previous_agent_reply>\n{text}\n</previous_agent_reply>")
     parts.append("Complete the user's request. Report what you did and what you found.")
     return "\n\n".join(parts)
 
 
-def run_gemini(model_id, prompt, api_key, workdir, gemini_bin, timeout_s):
-    """Run gemini-cli non-interactively; it drives its own tool loop."""
+def run_gemini(model_id, prompt, api_key, workdir, gemini_bin, timeout_s, should_abort=None):
+    """Run gemini-cli non-interactively; it drives its own tool loop.
+
+    Polls `should_abort` while gemini runs so a console interrupt can stop
+    the process mid-run instead of being noticed only after the fact.
+    """
     cmd = [
         gemini_bin,
         "--model", model_id,
@@ -113,15 +140,29 @@ def run_gemini(model_id, prompt, api_key, workdir, gemini_bin, timeout_s):
     env = dict(os.environ)
     if api_key:
         env["GEMINI_API_KEY"] = api_key
-    proc = subprocess.run(
-        cmd, cwd=workdir, env=env, timeout=timeout_s,
-        capture_output=True, text=True,
+    proc = subprocess.Popen(
+        cmd, cwd=workdir, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
+    deadline = time.time() + timeout_s
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+            break
+        except subprocess.TimeoutExpired:
+            if time.time() >= deadline:
+                proc.kill()
+                proc.communicate()
+                raise subprocess.TimeoutExpired(cmd, timeout_s) from None
+            if should_abort and should_abort():
+                proc.kill()
+                proc.communicate()
+                raise InterruptedSession() from None
     if proc.returncode != 0:
         raise RuntimeError(
-            f"gemini exited {proc.returncode}: {proc.stderr.strip()[:2000] or proc.stdout.strip()[:2000]}"
+            f"gemini exited {proc.returncode}: {stderr.strip()[:2000] or stdout.strip()[:2000]}"
         )
-    raw = proc.stdout.strip()
+    raw = stdout.strip()
     try:
         parsed = json.loads(raw)
         response = parsed.get("response") or raw
@@ -138,21 +179,33 @@ def run_gemini(model_id, prompt, api_key, workdir, gemini_bin, timeout_s):
 
 
 def execute(base, bundle, args):
-    session = bundle["session"]
-    agent = bundle["agent"]
-    sid = session["id"]
-    model_id = agent["model"]["id"]
-    key = (bundle.get("provider_key") or {}).get("value") or os.environ.get("GEMINI_API_KEY")
-
-    print(f"[runner] claimed {sid} ({session.get('title')}) — {agent['name']} / {model_id}")
-    prompt = build_prompt(agent, bundle.get("events") or [])
-
+    session = bundle.get("session") or {}
+    sid = session.get("id")
+    token = bundle.get("claim_token")
     workdir = tempfile.mkdtemp(prefix="gantry-")
     started = time.time()
+
+    def interrupted():
+        # Rate-limited poll of the control plane for user.interrupt.
+        try:
+            fresh = api(base, "GET", f"/v1/internal/sessions/{sid}")
+            return bool(fresh.get("interrupt_requested"))
+        except Exception:  # noqa: BLE001 — can't reach it? keep working
+            return False
+
     try:
+        # Everything from here on reports its failure into the trace: a
+        # malformed event or missing bundle field must terminate the session,
+        # not crash the claim loop (poison-pill session).
+        agent = bundle.get("agent") or {}
+        model_id = (agent.get("model") or {}).get("id") or "gemini-2.5-flash"
+        key = (bundle.get("provider_key") or {}).get("value") or os.environ.get("GEMINI_API_KEY")
+        print(f"[runner] claimed {sid} ({session.get('title')}) — {agent.get('name')} / {model_id}")
+        prompt = build_prompt(agent, bundle.get("events") or [])
+
         post_events(base, sid, [
             {"type": "span.model_request_start", "model": model_id},
-        ])
+        ], token)
         if args.dry_run:
             response = (
                 "Dry run: the worker claimed this session and would now hand the "
@@ -162,6 +215,7 @@ def execute(base, bundle, args):
         else:
             response, usage = run_gemini(
                 model_id, prompt, key, workdir, args.gemini_bin, args.timeout,
+                should_abort=interrupted,
             )
         events = [{"type": "agent.message", "content": [{"type": "text", "text": response}]}]
         if usage:
@@ -175,7 +229,7 @@ def execute(base, bundle, args):
             })
         events.append({"type": "session.status_idle", "stop_reason": "end_turn"})
         try:
-            post_events(base, sid, events)
+            post_events(base, sid, events, token)
         except Exception as err:  # noqa: BLE001
             # The model produced a result but the control plane is
             # unreachable: keep the response in the pod logs so the work
@@ -184,6 +238,11 @@ def execute(base, bundle, args):
             print(f"[runner] {sid} unreported agent response follows:\n{response}", file=sys.stderr)
             return
         print(f"[runner] {sid} idle after {time.time() - started:.0f}s")
+    except InterruptedSession:
+        post_events_best_effort(base, sid, [
+            {"type": "session.status_terminated", "stop_reason": "interrupted"},
+        ], token)
+        print(f"[runner] {sid} interrupted by user", file=sys.stderr)
     except subprocess.TimeoutExpired:
         post_events_best_effort(base, sid, [
             {"type": "session.error", "error": {
@@ -192,7 +251,7 @@ def execute(base, bundle, args):
                 "retry_status": "exhausted",
             }},
             {"type": "session.status_terminated", "stop_reason": "error"},
-        ])
+        ], token)
         print(f"[runner] {sid} terminated: timeout", file=sys.stderr)
     except Exception as err:  # report the failure into the trace, then continue polling
         post_events_best_effort(base, sid, [
@@ -200,7 +259,7 @@ def execute(base, bundle, args):
                 "type": "api_error", "message": str(err)[:2000], "retry_status": "exhausted",
             }},
             {"type": "session.status_terminated", "stop_reason": "error"},
-        ])
+        ], token)
         print(f"[runner] {sid} terminated: {err}", file=sys.stderr)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

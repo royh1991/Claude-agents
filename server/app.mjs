@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
 import {
+  id as newId,
   newAgentId, newEnvironmentId, newSessionId,
   newDeploymentId, newDeploymentRunId, newKeyId,
 } from './lib/ids.mjs';
@@ -38,6 +39,12 @@ function normalizeModel(model) {
     return { id: model.id, provider: model.provider ?? inferProvider(model.id) };
   }
   return null;
+}
+
+function publicSession(session) {
+  if (!session) return session;
+  const { claim_token, ...rest } = session;
+  return rest;
 }
 
 function maskKey(value) {
@@ -137,6 +144,7 @@ export function createApp(store) {
       title: title ?? null,
       status: 'queued',
       stop_reason: null,
+      claim_token: null,
       interrupt_requested: false,
       usage: { input_tokens: 0, output_tokens: 0 },
       deployment_run_id: deployment_run_id ?? null,
@@ -239,7 +247,10 @@ export function createApp(store) {
       if (session.status !== 'running') continue;
       const lastSeen = new Date(session.last_event_at ?? session.updated_at ?? session.created_at).getTime();
       if (lastSeen < cutoff) {
-        appendAndSync(session, {
+        // Rotate the token so the (presumed dead) claim holder is fenced
+        // off even if it wakes up later.
+        store.update('sessions', session.id, { claim_token: newId('clm') });
+        appendAndSync(store.find('sessions', session.id), {
           type: 'session.status_rescheduled',
           reason: `no worker activity for ${Math.round(LEASE_MS / 60000)} minutes; claim expired`,
         });
@@ -401,7 +412,7 @@ export function createApp(store) {
       const [type, message, status] = result.error;
       return apiError(res, status, type, message);
     }
-    res.json(result.session);
+    res.json(publicSession(result.session));
   });
 
   app.get('/v1/sessions', (req, res) => {
@@ -410,13 +421,13 @@ export function createApp(store) {
     if (req.query.status) sessions = sessions.filter((s) => s.status === req.query.status);
     sessions.sort((a, b) => b.created_at.localeCompare(a.created_at));
     const limit = Math.min(Number(req.query.limit ?? 100), 500);
-    res.json({ data: sessions.slice(0, limit) });
+    res.json({ data: sessions.slice(0, limit).map(publicSession) });
   });
 
   app.get('/v1/sessions/:id', (req, res) => {
     const session = store.find('sessions', req.params.id);
     if (!session) return apiError(res, 404, 'not_found_error', `session ${req.params.id} not found`);
-    res.json(session);
+    res.json(publicSession(session));
   });
 
   app.get('/v1/sessions/:id/events', (req, res) => {
@@ -639,7 +650,12 @@ export function createApp(store) {
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
     const session = queued[0];
     if (!session) return res.json({ session: null });
-    appendAndSync(session, { type: 'session.status_running', worker_id: worker_id ?? null });
+    // The claim token fences off stale workers: it rotates on every claim
+    // and on lease expiry, so a worker that lost its claim can no longer
+    // post events for a session someone else is running.
+    const claimToken = newId('clm');
+    store.update('sessions', session.id, { claim_token: claimToken });
+    appendAndSync(store.find('sessions', session.id), { type: 'session.status_running', worker_id: worker_id ?? null });
     const agent = resolveAgentVersion(session.agent.id, session.agent.version);
     const providerKey = store.all('provider_keys').find((k) => k.provider === agent?.model?.provider);
     if (providerKey) store.update('provider_keys', providerKey.id, { last_used_at: new Date().toISOString() });
@@ -648,12 +664,17 @@ export function createApp(store) {
       agent,
       events: store.readEvents(session.id),
       provider_key: providerKey ? { provider: providerKey.provider, value: providerKey.value } : null,
+      claim_token: claimToken,
     });
   });
 
   app.post('/v1/internal/sessions/:id/events', (req, res) => {
     const session = store.find('sessions', req.params.id);
     if (!session) return apiError(res, 404, 'not_found_error', `session ${req.params.id} not found`);
+    if (session.claim_token && req.body?.claim_token !== session.claim_token) {
+      return apiError(res, 409, 'conflict_error',
+        'stale claim: this session was re-claimed or its lease expired');
+    }
     const events = req.body?.events;
     if (!Array.isArray(events) || events.length === 0) {
       return apiError(res, 400, 'invalid_request_error', 'events must be a non-empty array');
@@ -721,7 +742,8 @@ export function createApp(store) {
       sessions_per_day: perDay,
       recent_sessions: [...sessions]
         .sort((a, b) => (b.last_event_at ?? b.created_at).localeCompare(a.last_event_at ?? a.created_at))
-        .slice(0, 8),
+        .slice(0, 8)
+        .map(publicSession),
       upcoming_runs: upcoming,
     });
   });

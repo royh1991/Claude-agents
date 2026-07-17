@@ -6,7 +6,8 @@
   "description": "Gantry control plane: agents, environments, sessions, events, scheduled deployments.",
   "scripts": {
     "start": "node index.mjs",
-    "seed": "node seed.mjs --reset"
+    "seed": "node seed.mjs --reset",
+    "test": "node --test"
   },
   "dependencies": {
     "express": "^4.21.2"

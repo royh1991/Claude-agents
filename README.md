@@ -109,17 +109,29 @@ runs `gemini --prompt … --yolo --output-format json`, and posts back
 `agent.message` + token usage + `session.status_idle` (or `session.error`
 + `session.status_terminated`). That's it by design.
 
-When it's time to grow up, the seams are already in place:
+Already handled beyond the single-shot loop:
+
+- **Interrupts** — the runner polls the control plane while gemini runs and
+  kills the process when the console sends `user.interrupt`
+  (`stop_reason: "interrupted"`).
+- **Claim fencing** — every claim issues a rotating `claim_token`; posts
+  with a stale token get 409, so a worker that lost its lease can't corrupt
+  a re-claimed session. The stale-claim sweeper rotates the token when it
+  re-queues a dead worker's session.
+- **Missed steering** — a user message that lands mid-run re-queues the
+  session when the worker reports idle, so it is never silently dropped.
+
+When it's time to grow up further, the seams are in place:
 
 1. **Streamed tool events** — parse gemini-cli's stream-json output and emit
    real `agent.tool_use`/`agent.tool_result` events instead of one final message.
-2. **Mid-run steering & interrupts** — poll `GET /v1/internal/sessions/:id`
-   between turns and honor `interrupt_requested` (the console already sends
-   `user.interrupt`).
-3. **Real MCP** — attach the agent's `mcp_servers` to gemini-cli's MCP config
+2. **Real MCP** — attach the agent's `mcp_servers` to gemini-cli's MCP config
    instead of shelling out to CLIs.
-4. **Different harnesses per provider** — the claim bundle carries
+3. **Different harnesses per provider** — the claim bundle carries
    `agent.model.provider`; route to a Claude/OpenAI harness when keys exist.
+
+Run the control-plane test suite (cron engine regressions incl. DST, the
+full session/claim/deployment lifecycle) with `cd server && npm test`.
 
 ## Repository layout
 
