@@ -138,9 +138,25 @@ export function generateAgentYaml(config) {
   return YAML.stringify(doc, { lineWidth: 96, blockQuote: 'literal' });
 }
 
-// ---- Trigger YAML (declarative; see docs/DESIGN.md — the exact shape is a
-// proposal pending managed_agent_frontend.md and is versioned so the backend
-// can evolve it).
+// ---- Trigger YAML (schema_version 2 — a proposal pending reconciliation
+// with managed_agent_frontend.md).
+//
+// The taxonomy mirrors how Airflow actually orchestrates agents:
+//   dag_complete  — fires when an upstream DAG reaches a terminal state.
+//                   `states` defaults to [success, failed] (all_done
+//                   semantics) because task state can lie: DBTBuild exits
+//                   green while run_results.json contains failed nodes.
+//   asset_updated — fires on Airflow 3 asset events; wired by one generic
+//                   router DAG scheduled on the union of declared assets.
+//   schedule      — cron + IANA timezone; wired by one generic scheduler.
+//   manual        — console/API only.
+// `only_if` carries content-based conditions the wiring layer evaluates
+// (today: dbt_failed_nodes from the S3 artifacts), because "the DAG went
+// green" and "the build was clean" are different facts.
+
+const FIRE_KINDS = new Set(['dag_complete', 'asset_updated', 'schedule', 'manual']);
+const DAG_STATES = new Set(['success', 'failed']);
+const CONDITION_TYPES = new Set(['dbt_failed_nodes']);
 
 export function validateTriggerConfig(config, catalog) {
   const problems = [];
@@ -153,16 +169,43 @@ export function validateTriggerConfig(config, catalog) {
   if (!config.agent?.id || !agentIds.has(config.agent.id)) {
     problems.push(`agent.id: must reference an existing agent (${[...agentIds].join(', ') || 'none found'})`);
   }
-  const source = config.source ?? {};
-  const events = new Set(['on_failure', 'on_success', 'schedule', 'manual']);
-  if (!events.has(source.event)) {
-    problems.push(`source.event: must be one of ${[...events].join(', ')}`);
+
+  const fire = config.fire ?? {};
+  if (!FIRE_KINDS.has(fire.when)) {
+    problems.push(`fire.when: must be one of ${[...FIRE_KINDS].join(', ')}`);
   }
-  if (source.event === 'schedule') {
-    if (!source.schedule?.cron) problems.push('source.schedule.cron: required for schedule triggers');
-  } else if (source.event !== 'manual' && !source.dag_id) {
-    problems.push('source.dag_id: required for on_failure / on_success triggers');
+  if (fire.when === 'dag_complete') {
+    if (!fire.dag_id || typeof fire.dag_id !== 'string') {
+      problems.push('fire.dag_id: required — the upstream DAG to watch');
+    }
+    for (const state of fire.states ?? []) {
+      if (!DAG_STATES.has(state)) problems.push(`fire.states: "${state}" is not a terminal dag-run state (success | failed)`);
+    }
   }
+  if (fire.when === 'asset_updated') {
+    if (!Array.isArray(fire.assets) || fire.assets.length === 0
+      || fire.assets.some((a) => typeof a !== 'string' || !a.trim())) {
+      problems.push('fire.assets: required — one or more Airflow asset URIs/names');
+    }
+  }
+  if (fire.when === 'schedule') {
+    if (!fire.schedule?.cron) problems.push('fire.schedule.cron: required for schedule triggers');
+  }
+
+  if (config.only_if != null) {
+    if (!Array.isArray(config.only_if)) {
+      problems.push('only_if: must be a list of conditions');
+    } else {
+      for (const cond of config.only_if) {
+        if (!CONDITION_TYPES.has(cond?.type)) {
+          problems.push(`only_if: unsupported condition type "${cond?.type}" (supported: ${[...CONDITION_TYPES].join(', ')})`);
+        } else if (cond.present != null && typeof cond.present !== 'boolean') {
+          problems.push(`only_if.${cond.type}.present: must be true or false`);
+        }
+      }
+    }
+  }
+
   const request = config.request ?? {};
   if (!request.message || typeof request.message !== 'string' || !request.message.trim()) {
     problems.push('request.message: required — the user.message text each firing sends');
@@ -184,13 +227,24 @@ export function validateTriggerConfig(config, catalog) {
 export function generateTriggerYaml(config) {
   const doc = {
     type: 'trigger',
-    schema_version: 1,
+    schema_version: 2,
     id: config.id,
   };
   if (config.description) doc.description = config.description;
   doc.agent = { id: config.agent.id };
   if (config.agent.version != null) doc.agent.version = config.agent.version;
-  doc.source = config.source;
+
+  const fire = { when: config.fire.when };
+  if (config.fire.when === 'dag_complete') {
+    fire.dag_id = config.fire.dag_id;
+    fire.states = config.fire.states?.length ? config.fire.states : ['success', 'failed'];
+  }
+  if (config.fire.when === 'asset_updated') fire.assets = config.fire.assets;
+  if (config.fire.when === 'schedule') fire.schedule = config.fire.schedule;
+  doc.fire = fire;
+
+  if (config.only_if?.length) doc.only_if = config.only_if;
+
   doc.request = {};
   if (config.request.title) doc.request.title = config.request.title;
   if (config.request.response_format) doc.request.response_format = config.request.response_format;

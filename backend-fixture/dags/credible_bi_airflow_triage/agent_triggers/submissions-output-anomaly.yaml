@@ -1,0 +1,32 @@
+type: trigger
+schema_version: 2
+id: submissions-output-anomaly
+description: >-
+  Scan submissions_output for anomalies whenever the asset materializes
+  (Airflow 3 asset event). Skips runs where the producing build had failed
+  nodes — anomaly detection on a broken build is noise.
+agent:
+  id: anomaly-detector
+fire:
+  when: asset_updated
+  assets:
+    - snowflake://analytics/submissions_output
+only_if:
+  - type: dbt_failed_nodes
+    present: false
+request:
+  title: "anomaly scan: submissions_output"
+  response_format: anomaly_report
+  resources:
+    - type: repository_alias
+      alias: credible-dbt
+  metadata:
+    dbt_asset: submissions_output
+    grain: day
+    lookback_days: 35
+  message: |
+    Inspect recent daily behavior of submissions_output at day grain.
+    Compare against the 28-day seasonal baseline and report anomalies with
+    query proof, or state plainly that the data looks healthy.
+notifications:
+  - type: slack

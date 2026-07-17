@@ -71,7 +71,7 @@ dev replica of the backend package's catalog files.
 | **Run composer** | Builds a §4.1 **session envelope** (`type: session`, `agent`, `events[0].user.message`, `resources`, `metadata`, `response_format`) |
 | **Runs** | `ai-agent-runner` dag runs; the task pipeline (build-request → run-agent → evaluate-result → post-notifications) with the run-agent XCom rendered as the result |
 | **Run result** | The §10 result envelope; `result.result` rendered schema-driven from the response format; statuses `success / invalid_input / resource_error / provider_error / invalid_output / runtime_error` |
-| **Triggers** | Declarative `agent_triggers/<id>.yaml` (shape is `schema_version: 1`, a **proposal** pending `managed_agent_frontend.md` reconciliation) |
+| **Triggers** | Declarative `agent_triggers/<id>.yaml` (`schema_version: 2`, a **proposal** pending `managed_agent_frontend.md`). Fire kinds mirror real Airflow orchestration: `dag_complete` (all_done + content conditions, because dbt task state can lie), `asset_updated` (Airflow 3 Assets via one generic router DAG), `schedule` (one generic scheduler), `manual`. `only_if` conditions (e.g. `dbt_failed_nodes`) are evaluated from run artifacts, not task state |
 | **Library** | `skills/*.md`, `tools/*.yaml`, `response_formats/*.yaml` read-only browsers |
 | **Environment** | `environments/airflow-triage-runtime.yaml` + shared guardrails |
 

@@ -117,10 +117,11 @@ test('publish writes only agents/<id>/agent.yaml and guards overwrites', async (
 test('trigger publish validates and writes agent_triggers/<id>.yaml', async () => {
   const config = {
     type: 'trigger',
-    id: 'dbt-core-failure-triage',
-    description: 'Fire triage on dbt-core failures',
+    id: 'dbt-core-triage-hook',
+    description: 'Fire triage when dbt-core ships failed nodes',
     agent: { id: 'airflow-failure-triage' },
-    source: { dag_id: 'dbt-core', event: 'on_failure' },
+    fire: { when: 'dag_complete', dag_id: 'dbt-core', states: ['success', 'failed'] },
+    only_if: [{ type: 'dbt_failed_nodes', present: true }],
     request: {
       response_format: 'failure_triage_report',
       resources: [],
@@ -129,14 +130,46 @@ test('trigger publish validates and writes agent_triggers/<id>.yaml', async () =
   };
   const preview = await call('POST', '/api/triggers/preview', { config });
   assert.deepEqual(preview.body.problems, []);
+  assert.match(preview.body.yaml, /schema_version: 2/);
+  assert.match(preview.body.yaml, /only_if:/);
   const pub = await call('POST', '/api/triggers/publish', { config });
   assert.equal(pub.status, 200);
-  assert.equal(pub.body.path, 'dags/credible_bi_airflow_triage/agent_triggers/dbt-core-failure-triage.yaml');
+  assert.equal(pub.body.path, 'dags/credible_bi_airflow_triage/agent_triggers/dbt-core-triage-hook.yaml');
 
   const missingMsg = await call('POST', '/api/triggers/preview', {
     config: { ...config, request: { ...config.request, message: '' } },
   });
   assert.match(missingMsg.body.problems.join('\n'), /request.message/);
+
+  // Asset triggers need assets; bad conditions and states are rejected.
+  const badAsset = await call('POST', '/api/triggers/preview', {
+    config: { ...config, id: 'asset-trigger', fire: { when: 'asset_updated', assets: [] } },
+  });
+  assert.match(badAsset.body.problems.join('\n'), /fire.assets: required/);
+  const badCond = await call('POST', '/api/triggers/preview', {
+    config: { ...config, only_if: [{ type: 'phase_of_moon' }] },
+  });
+  assert.match(badCond.body.problems.join('\n'), /unsupported condition type/);
+  const badState = await call('POST', '/api/triggers/preview', {
+    config: { ...config, fire: { when: 'dag_complete', dag_id: 'x', states: ['queued'] } },
+  });
+  assert.match(badState.body.problems.join('\n'), /not a terminal dag-run state/);
+});
+
+test('fixture trigger YAMLs are valid schema v2 and load in the catalog', async () => {
+  const cat = (await call('GET', '/api/catalog')).body;
+  const ids = cat.triggers.map((t) => t.id);
+  assert.ok(ids.includes('dbt-core-failure-triage'));
+  assert.ok(ids.includes('submissions-output-anomaly'));
+  for (const trigger of cat.triggers) {
+    assert.equal(trigger.parse_error, null);
+  }
+  const anomaly = cat.triggers.find((t) => t.id === 'submissions-output-anomaly');
+  assert.equal(anomaly.config.fire.when, 'asset_updated');
+  assert.deepEqual(anomaly.config.only_if, [{ type: 'dbt_failed_nodes', present: false }]);
+  const triage = cat.triggers.find((t) => t.id === 'dbt-core-failure-triage');
+  assert.equal(triage.config.fire.when, 'dag_complete');
+  assert.deepEqual(triage.config.fire.states, ['success', 'failed']);
 });
 
 test('session envelope validation enforces the backend request contract', async () => {

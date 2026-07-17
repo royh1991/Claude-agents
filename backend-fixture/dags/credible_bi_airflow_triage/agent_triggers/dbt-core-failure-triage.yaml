@@ -1,0 +1,28 @@
+type: trigger
+schema_version: 2
+id: dbt-core-failure-triage
+description: >-
+  Triage dbt-core builds that shipped failed nodes. Fires on any terminal
+  state of the upstream DAG because DBTBuild can exit green while
+  run_results.json contains failures — the condition, not the task state,
+  decides.
+agent:
+  id: airflow-failure-triage
+fire:
+  when: dag_complete
+  dag_id: dbt-core
+  states: [success, failed]
+only_if:
+  - type: dbt_failed_nodes
+    present: true
+request:
+  title: "dbt-core failure triage"
+  response_format: failure_triage_report
+  resources: []
+  message: |
+    Triage the failed dbt-core build. The failed nodes, their error
+    messages, and the Airflow run context (dag_id, run_id, log_url) arrive
+    in this session's metadata. Separate root cause from symptoms and file
+    an issue if the cause is upstream data.
+notifications:
+  - type: slack

@@ -195,12 +195,21 @@ export interface PublishResult {
   next_steps: string;
 }
 
+export type TriggerFireKind = 'dag_complete' | 'asset_updated' | 'schedule' | 'manual';
+
 export interface TriggerConfig {
   type: 'trigger';
   id: string;
   description?: string;
   agent: { id: string; version?: number };
-  source: { event: 'on_failure' | 'on_success' | 'schedule' | 'manual'; dag_id?: string; schedule?: { cron: string; timezone: string } };
+  fire: {
+    when: TriggerFireKind;
+    dag_id?: string;
+    states?: ('success' | 'failed')[];
+    assets?: string[];
+    schedule?: { cron: string; timezone: string };
+  };
+  only_if?: { type: 'dbt_failed_nodes'; present: boolean }[];
   request: {
     title?: string;
     response_format?: string;
