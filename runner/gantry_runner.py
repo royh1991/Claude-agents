@@ -49,8 +49,28 @@ def api(base, method, path, body=None):
         return json.loads(res.read())
 
 
-def post_events(base, session_id, events):
-    return api(base, "POST", f"/v1/internal/sessions/{session_id}/events", {"events": events})
+def post_events(base, session_id, events, attempts=3):
+    """Post events with retries — a transient control-plane blip must not
+    discard a completed gemini run."""
+    last_err = None
+    for attempt in range(attempts):
+        try:
+            return api(base, "POST", f"/v1/internal/sessions/{session_id}/events", {"events": events})
+        except Exception as err:  # noqa: BLE001 — sockets raise a zoo of types
+            last_err = err
+            time.sleep(2 ** attempt)
+    raise RuntimeError(f"failed to post events for {session_id} after {attempts} attempts: {last_err}")
+
+
+def post_events_best_effort(base, session_id, events):
+    """For failure reporting: if the control plane is what's down, posting the
+    failure will fail too — log instead of crashing the worker (double-fault)."""
+    try:
+        post_events(base, session_id, events)
+        return True
+    except Exception as err:  # noqa: BLE001
+        print(f"[runner] could not report events for {session_id}: {err}", file=sys.stderr)
+        return False
 
 
 def build_prompt(agent, events):
@@ -154,10 +174,18 @@ def execute(base, bundle, args):
                 },
             })
         events.append({"type": "session.status_idle", "stop_reason": "end_turn"})
-        post_events(base, sid, events)
+        try:
+            post_events(base, sid, events)
+        except Exception as err:  # noqa: BLE001
+            # The model produced a result but the control plane is
+            # unreachable: keep the response in the pod logs so the work
+            # isn't lost, and leave the session to the stale-claim sweeper.
+            print(f"[runner] {sid} completed but could not be reported: {err}", file=sys.stderr)
+            print(f"[runner] {sid} unreported agent response follows:\n{response}", file=sys.stderr)
+            return
         print(f"[runner] {sid} idle after {time.time() - started:.0f}s")
     except subprocess.TimeoutExpired:
-        post_events(base, sid, [
+        post_events_best_effort(base, sid, [
             {"type": "session.error", "error": {
                 "type": "timeout_error",
                 "message": f"gemini-cli exceeded {args.timeout}s",
@@ -167,7 +195,7 @@ def execute(base, bundle, args):
         ])
         print(f"[runner] {sid} terminated: timeout", file=sys.stderr)
     except Exception as err:  # report the failure into the trace, then continue polling
-        post_events(base, sid, [
+        post_events_best_effort(base, sid, [
             {"type": "session.error", "error": {
                 "type": "api_error", "message": str(err)[:2000], "retry_status": "exhausted",
             }},
@@ -183,8 +211,10 @@ def claim(base, environment_id, worker_id):
         return api(base, "POST", "/v1/internal/claim", {
             "environment_id": environment_id, "worker_id": worker_id,
         })
-    except urllib.error.URLError as err:
-        print(f"[runner] control plane unreachable: {err}", file=sys.stderr)
+    except Exception as err:  # noqa: BLE001 — URLError, socket timeouts,
+        # ConnectionResetError, IncompleteRead, JSONDecodeError from an LB
+        # error page: all mean the same thing here — try again next poll.
+        print(f"[runner] claim failed: {err}", file=sys.stderr)
         return {"session": None}
 
 
@@ -196,21 +226,28 @@ def main():
     parser.add_argument("--gemini-bin", default="gemini")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S, help="per-session gemini timeout (s)")
     parser.add_argument("--once", action="store_true", help="claim and run at most one session, then exit")
+    parser.add_argument("--drain", action="store_true", help="run sessions until the queue is empty, then exit")
     parser.add_argument("--poll", type=int, metavar="SECONDS", help="poll forever at this interval")
     parser.add_argument("--dry-run", action="store_true", help="skip gemini; post a canned reply")
     args = parser.parse_args()
 
-    if not args.once and not args.poll:
-        parser.error("pass --once or --poll SECONDS")
+    if not args.once and not args.drain and not args.poll:
+        parser.error("pass --once, --drain, or --poll SECONDS")
 
+    ran = 0
     while True:
         bundle = claim(args.api_base, args.environment_id, args.worker_id)
         if bundle.get("session"):
-            execute(args.api_base, bundle, args)
+            try:
+                execute(args.api_base, bundle, args)
+            except Exception as err:  # noqa: BLE001 — one bad session must not kill the worker
+                sid = (bundle.get("session") or {}).get("id")
+                print(f"[runner] unexpected failure on {sid}: {err}", file=sys.stderr)
+            ran += 1
             if args.once:
                 return
-        elif args.once:
-            print("[runner] nothing queued")
+        elif args.once or args.drain:
+            print(f"[runner] queue empty after {ran} session(s)")
             return
         else:
             time.sleep(args.poll)

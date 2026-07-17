@@ -30,10 +30,15 @@ export class Store {
   }
 
   #load(name) {
+    const file = this.#file(name);
     try {
-      return JSON.parse(fs.readFileSync(this.#file(name), 'utf8'));
-    } catch {
-      return [];
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (err) {
+      // Only a missing file means empty. Anything else (corrupt JSON, bad
+      // permissions) must fail fast — returning [] here would let the next
+      // save() permanently overwrite a recoverable file.
+      if (err.code === 'ENOENT') return [];
+      throw new Error(`failed to load ${file}: ${err.message} — fix or remove the file to start`);
     }
   }
 
@@ -96,14 +101,24 @@ export class Store {
   }
 
   readEvents(sessionId) {
+    let raw;
     try {
-      return fs.readFileSync(this.#eventsFile(sessionId), 'utf8')
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => JSON.parse(line));
+      raw = fs.readFileSync(this.#eventsFile(sessionId), 'utf8');
     } catch {
       return [];
     }
+    const events = [];
+    for (const line of raw.split('\n')) {
+      if (!line) continue;
+      try {
+        events.push(JSON.parse(line));
+      } catch {
+        // One truncated line (e.g. a crash mid-append) must not hide the
+        // rest of the log.
+        console.warn(`[gantry] skipping corrupt event line in ${sessionId}`);
+      }
+    }
+    return events;
   }
 
   subscribe(sessionId, fn) {

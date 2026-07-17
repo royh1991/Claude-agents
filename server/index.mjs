@@ -17,6 +17,7 @@ const app = createApp(store);
 setInterval(() => {
   try {
     app.locals.tickSchedules();
+    app.locals.sweepStaleClaims();
   } catch (err) {
     console.error('[gantry] scheduler tick failed:', err);
   }

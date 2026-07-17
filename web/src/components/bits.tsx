@@ -58,7 +58,14 @@ export function ModelBadge({ model }: { model: { id: string } }) {
 /* Minimal markdown for agent messages: paragraphs, pipe tables, bold,
    inline code, and links. Input is escaped before any tags are added. */
 function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Quotes must be escaped too: link URLs land inside href="…", where an
+  // unescaped quote would let event text break out of the attribute.
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function inline(s: string): string {
@@ -76,6 +83,7 @@ export function Markdown({ text }: { text: string }) {
       const rows = lines
         .filter((l) => !/^\|[\s:-]+\|?[\s:|-]*$/.test(l.trim()))
         .map((l) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim())));
+      if (rows.length === 0) return '';
       const [head, ...body] = rows;
       return `<table><thead><tr>${head.map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${
         body.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')

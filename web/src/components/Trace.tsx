@@ -83,8 +83,10 @@ function StatusTick({ event }: { event: SessionEvent }) {
 
 export function Trace({ events, running }: { events: SessionEvent[]; running: boolean }) {
   const items: React.ReactNode[] = [];
+  const consumed = new Set<string>();
   for (let i = 0; i < events.length; i++) {
     const event = events[i];
+    if (consumed.has(event.id)) continue;
     switch (event.type) {
       case 'user.message':
         items.push(
@@ -115,10 +117,16 @@ export function Trace({ events, running }: { events: SessionEvent[]; running: bo
       case 'agent.tool_use':
       case 'agent.mcp_tool_use': {
         const resultType = event.type === 'agent.tool_use' ? 'agent.tool_result' : 'agent.mcp_tool_result';
+        // Pair with the first unclaimed result of the matching type anywhere
+        // ahead — batched tool calls emit use,use,result,result and results
+        // arrive in call order, so first-in-first-out pairing holds.
         let result: SessionEvent | null = null;
-        if (i + 1 < events.length && events[i + 1].type === resultType) {
-          result = events[i + 1];
-          i++;
+        for (let j = i + 1; j < events.length; j++) {
+          if (events[j].type === resultType && !consumed.has(events[j].id)) {
+            result = events[j];
+            consumed.add(events[j].id);
+            break;
+          }
         }
         items.push(
           <div className="tr-item" key={event.id}>

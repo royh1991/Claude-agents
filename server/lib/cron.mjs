@@ -97,9 +97,13 @@ export function upcomingRuns(expression, timezone, from = new Date(), count = 3)
   const minutes = [...cron.minute].sort((a, b) => a - b);
   const results = [];
   const start = new Date(Math.ceil((from.getTime() + 1) / 60000) * 60000);
-  // Walk day by day in the target timezone (bounded to ~13 months).
+  const p0 = zonedParts(start, timezone);
+  // Walk successive *local calendar days*, each probed at local midday.
+  // A fixed 24h UTC step would skip the 23-hour spring-forward day (and
+  // double-probe the fall-back day); calendar-day arithmetic anchored away
+  // from midnight is immune to both. Date.UTC rolls day overflow forward.
   for (let dayOffset = 0; dayOffset < 400 && results.length < count; dayOffset++) {
-    const probe = new Date(start.getTime() + dayOffset * 86400000);
+    const probe = zonedToUtc(p0.year, p0.month, p0.day + dayOffset, 12, 0, timezone);
     const parts = zonedParts(probe, timezone);
     if (!dayMatches(cron, parts)) continue;
     for (const h of hours) {

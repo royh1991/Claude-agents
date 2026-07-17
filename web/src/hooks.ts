@@ -8,10 +8,17 @@ export function useFetch<T>(path: string | null, pollMs?: number) {
   pathRef.current = path;
 
   const reload = useCallback(() => {
-    if (!pathRef.current) return;
-    api.get<T>(pathRef.current)
-      .then((d) => { setData(d); setError(null); })
-      .catch((e: Error) => setError(e.message));
+    const requested = pathRef.current;
+    if (!requested) return;
+    api.get<T>(requested)
+      .then((d) => {
+        // Drop the response if the component navigated to a different path
+        // while this reload was in flight.
+        if (pathRef.current === requested) { setData(d); setError(null); }
+      })
+      .catch((e: Error) => {
+        if (pathRef.current === requested) setError(e.message);
+      });
   }, []);
 
   useEffect(() => {

@@ -89,6 +89,9 @@ GET  /v1/internal/sessions/:id               → poll session state (interrupts)
 
 The public events endpoint accepts only `user.*` events; posting a
 `user.message` to an idle session re-queues it for the next worker poll.
+If a worker dies after claiming, the stale-claim sweeper re-queues any
+running session with no events for `GANTRY_SESSION_LEASE_MINUTES`
+(default 45).
 
 ## Security model
 

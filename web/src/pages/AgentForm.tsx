@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../api';
+import { api, ApiError } from '../api';
 import type { Agent, McpServer } from '../types';
 
 const MODELS: { id: string; provider: string; label: string }[] = [
@@ -77,7 +77,19 @@ export function AgentForm() {
         : await api.post<Agent>('/v1/agents', body);
       navigate(`/agents/${saved.id}`);
     } catch (e) {
-      setError((e as Error).message);
+      if (editing && e instanceof ApiError && e.status === 409) {
+        // Someone else saved a new version meanwhile. Adopt the current
+        // version so the next save applies on top of it.
+        try {
+          const fresh = await api.get<Agent>(`/v1/agents/${id}`);
+          setVersion(fresh.version);
+          setError(`This agent was updated elsewhere and is now v${fresh.version}. Review your changes and save again to apply them on top.`);
+        } catch {
+          setError((e as Error).message);
+        }
+      } else {
+        setError((e as Error).message);
+      }
       setSaving(false);
     }
   }

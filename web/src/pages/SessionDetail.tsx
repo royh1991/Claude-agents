@@ -20,9 +20,9 @@ export function SessionDetail() {
   useEffect(() => {
     if (!id) return;
     let alive = true;
-    api.get<{ data: SessionEvent[] }>(`/v1/sessions/${id}/events`)
-      .then((r) => { if (alive) setEvents(r.data); })
-      .catch(() => { if (alive) setEvents([]); });
+    // Subscribe before fetching the snapshot so events landing during the
+    // fetch arrive on the stream; the id-based merge below dedupes overlap
+    // and keeps live events that beat the snapshot home.
     const close = streamSession(id, (event) => {
       if (!alive) return;
       setEvents((prev) => {
@@ -33,6 +33,16 @@ export function SessionDetail() {
       });
       reload();
     });
+    api.get<{ data: SessionEvent[] }>(`/v1/sessions/${id}/events`)
+      .then((r) => {
+        if (!alive) return;
+        setEvents((prev) => {
+          const seen = new Set(r.data.map((e) => e.id));
+          const liveTail = (prev ?? []).filter((e) => !seen.has(e.id));
+          return [...r.data, ...liveTail];
+        });
+      })
+      .catch(() => { if (alive) setEvents((prev) => prev ?? []); });
     return () => { alive = false; close(); };
   }, [id, reload]);
 

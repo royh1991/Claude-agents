@@ -76,9 +76,21 @@ export function createApp(store) {
       case 'session.status_running':
         patch.status = 'running';
         break;
-      case 'session.status_idle':
-        patch.status = 'idle';
+      case 'session.status_idle': {
+        // If a user message arrived after the worker last started (steering
+        // that the simple runner didn't see), the session still has work:
+        // put it back in the queue instead of parking it idle.
+        const events = store.readEvents(session.id);
+        const lastRun = events.map((e) => e.type).lastIndexOf('session.status_running');
+        const backlog = events.slice(lastRun + 1).some((e) => e.type === 'user.message');
+        patch.status = backlog ? 'queued' : 'idle';
         patch.stop_reason = full.stop_reason ?? 'end_turn';
+        patch.interrupt_requested = false;
+        break;
+      }
+      case 'session.status_rescheduled':
+        // Transient failure: back to the pool for the next worker poll.
+        patch.status = 'queued';
         patch.interrupt_requested = false;
         break;
       case 'session.status_terminated':
@@ -200,12 +212,38 @@ export function createApp(store) {
   app.locals.tickSchedules = () => {
     const now = new Date();
     for (const deployment of store.all('deployments')) {
-      if (deployment.status !== 'active' || !deployment.next_run_at) continue;
+      if (deployment.status !== 'active') continue;
+      if (!deployment.next_run_at) {
+        // The next occurrence was beyond the 400-day search horizon when it
+        // was last computed (e.g. "0 0 29 2 *"). Keep retrying so the
+        // schedule revives once the horizon reaches it.
+        const next = nextRun(deployment.schedule.expression, deployment.schedule.timezone, now);
+        if (next) store.update('deployments', deployment.id, { next_run_at: next.toISOString() });
+        continue;
+      }
       if (new Date(deployment.next_run_at) > now) continue;
       const scheduledAt = deployment.next_run_at;
       const next = nextRun(deployment.schedule.expression, deployment.schedule.timezone, now);
       store.update('deployments', deployment.id, { next_run_at: next ? next.toISOString() : null });
       triggerDeployment(deployment, { type: 'schedule', scheduled_at: scheduledAt });
+    }
+  };
+
+  // Stale-claim sweeper: a worker that dies after claiming would otherwise
+  // strand its session in 'running' forever. Any running session with no
+  // events for the lease window is re-queued for the next worker poll.
+  const LEASE_MS = Number(process.env.GANTRY_SESSION_LEASE_MINUTES ?? 45) * 60000;
+  app.locals.sweepStaleClaims = () => {
+    const cutoff = Date.now() - LEASE_MS;
+    for (const session of store.all('sessions')) {
+      if (session.status !== 'running') continue;
+      const lastSeen = new Date(session.last_event_at ?? session.updated_at ?? session.created_at).getTime();
+      if (lastSeen < cutoff) {
+        appendAndSync(session, {
+          type: 'session.status_rescheduled',
+          reason: `no worker activity for ${Math.round(LEASE_MS / 60000)} minutes; claim expired`,
+        });
+      }
     }
   };
 
