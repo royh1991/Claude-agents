@@ -217,3 +217,53 @@ test('instanceFromSchema produces schema-valid instances', () => {
   };
   assert.deepEqual(validateInstance(instanceFromSchema(schema), schema), []);
 });
+
+test('regression: malformed envelopes return 400, never hang or crash', async () => {
+  const badContent = await call('POST', '/api/runs', {
+    envelope: {
+      type: 'session',
+      agent: { id: 'anomaly-detector' },
+      events: [{ type: 'user.message', content: 'hi' }],
+    },
+  });
+  assert.equal(badContent.status, 400);
+  assert.match(badContent.body.error.details.join('\n'), /content: must be an array/);
+
+  const badResources = await call('POST', '/api/runs', {
+    envelope: {
+      type: 'session',
+      agent: { id: 'anomaly-detector' },
+      resources: {},
+      events: [{ type: 'user.message', content: [{ type: 'text', text: 'go' }] }],
+    },
+  });
+  assert.equal(badResources.status, 400);
+  assert.match(badResources.body.error.details.join('\n'), /resources: must be an array/);
+});
+
+test('regression: prototype-chain names and object-form entries are rejected', async () => {
+  const proto = await call('POST', '/api/agents/preview', {
+    config: { ...GOOD_AGENT, id: 'proto-test-agent', response_format: 'toString' },
+  });
+  assert.match(proto.body.problems.join('\n'), /response_format: "toString" not found/);
+
+  const objForm = await call('POST', '/api/agents/preview', {
+    config: { ...GOOD_AGENT, id: 'obj-form-agent', tools: [{ name: 'file_read' }], skills: [{ skill_id: 'dbt' }] },
+  });
+  const text = objForm.body.problems.join('\n');
+  assert.match(text, /tools: entries must be plain handler-name strings/);
+  assert.match(text, /skills: entries must be plain skill-stem strings/);
+});
+
+test('regression: only airflow-triage-runtime is an accepted environment', async () => {
+  const bad = await call('POST', '/api/runs', {
+    envelope: {
+      type: 'session',
+      agent: { id: 'anomaly-detector' },
+      environment_id: 'some-other-env',
+      events: [{ type: 'user.message', content: [{ type: 'text', text: 'go' }] }],
+    },
+  });
+  assert.equal(bad.status, 400);
+  assert.match(bad.body.error.details.join('\n'), /only "airflow-triage-runtime"/);
+});

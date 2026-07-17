@@ -9,7 +9,7 @@ export function Overview() {
   const { data, error } = useFetch<OverviewData>('/api/overview', 10000);
   const { data: catalog } = useCatalog();
 
-  if (error) return <div className="alert error">Couldn't load the overview: {error}</div>;
+  if (error && !data) return <div className="alert error">Couldn't load the overview: {error}</div>;
   if (!data) return null;
 
   return (

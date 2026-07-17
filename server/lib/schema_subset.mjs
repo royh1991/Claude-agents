@@ -5,10 +5,10 @@
 //   2. validateInstance — validate a value against a subset schema (used by
 //      the mock Airflow adapter and tests).
 
+// Exactly the keywords the backend validator implements — nothing more.
 const SUPPORTED_KEYWORDS = new Set([
   'type', 'enum', 'required', 'properties', 'additionalProperties',
   'minItems', 'minLength', 'minimum', 'maximum', 'items',
-  'description', 'default', // annotations the backend tolerates
 ]);
 
 export function checkSchemaSubset(schema, path = 'schema') {
@@ -19,7 +19,7 @@ export function checkSchemaSubset(schema, path = 'schema') {
   }
   for (const key of Object.keys(schema)) {
     if (!SUPPORTED_KEYWORDS.has(key)) {
-      problems.push(`${path}.${key}: unsupported keyword — the runtime validator only supports ${[...SUPPORTED_KEYWORDS].filter((k) => k !== 'description' && k !== 'default').join(', ')}`);
+      problems.push(`${path}.${key}: unsupported keyword — the runtime validator only supports ${[...SUPPORTED_KEYWORDS].join(', ')}`);
     }
   }
   if ('properties' in schema) {

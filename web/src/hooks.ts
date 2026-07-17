@@ -33,7 +33,9 @@ export function useFetch<T>(path: string | null, pollMs?: number) {
     let timer: number | undefined;
     if (pollMs) {
       timer = window.setInterval(() => {
-        api.get<T>(path).then((d) => { if (alive) setData(d); }).catch(() => {});
+        api.get<T>(path)
+          .then((d) => { if (alive) { setData(d); setError(null); } })
+          .catch((e: Error) => { if (alive) setError(e.message); });
       }, pollMs);
     }
     return () => { alive = false; if (timer) clearInterval(timer); };

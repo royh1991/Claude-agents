@@ -18,7 +18,7 @@ interface FormState {
   skills: string[];
   response_format: string;
   owner_team: string;
-  repo_mode: 'none' | 'defaults' | 'all';
+  include_all_repos: boolean;
   default_aliases: string;
   notify_slack: boolean;
 }
@@ -26,7 +26,7 @@ interface FormState {
 const BLANK: FormState = {
   id: '', version: 1, name: '', description: '', model: MODEL_CHOICES[0],
   system: '', tools: [], skills: [], response_format: '',
-  owner_team: '', repo_mode: 'none', default_aliases: '', notify_slack: true,
+  owner_team: '', include_all_repos: false, default_aliases: '', notify_slack: true,
 };
 
 function fromConfig(config: AgentConfig): FormState {
@@ -42,33 +42,52 @@ function fromConfig(config: AgentConfig): FormState {
     skills: (config.skills ?? []).map(skillId),
     response_format: config.response_format ?? '',
     owner_team: String(metadata.owner_team ?? ''),
-    repo_mode: metadata.include_all_repository_aliases_by_default
-      ? 'all'
-      : (metadata.default_repository_aliases?.length ? 'defaults' : 'none'),
+    include_all_repos: Boolean(metadata.include_all_repository_aliases_by_default),
     default_aliases: (metadata.default_repository_aliases ?? []).join(', '),
     notify_slack: (metadata.notification_defaults ?? []).some((n) => n.type === 'slack'),
   };
 }
 
-function toConfig(form: FormState): AgentConfig {
-  const metadata: AgentConfig['metadata'] = {};
+// Merge form fields onto the original config so everything the form does
+// not model — free-form metadata keys, inline response_formats, non-slack
+// notifications, a slack channel, an object-form model's provider — is
+// preserved verbatim on edit + republish.
+function toConfig(form: FormState, base: AgentConfig | null): AgentConfig {
+  const metadata: AgentConfig['metadata'] = { ...(base?.metadata ?? {}) };
+  delete metadata.owner_team;
+  delete metadata.include_all_repository_aliases_by_default;
+  delete metadata.default_repository_aliases;
   if (form.owner_team.trim()) metadata.owner_team = form.owner_team.trim();
-  if (form.repo_mode === 'all') metadata.include_all_repository_aliases_by_default = true;
-  if (form.repo_mode === 'defaults') {
-    metadata.default_repository_aliases = form.default_aliases.split(',').map((s) => s.trim()).filter(Boolean);
-  }
-  if (form.notify_slack) metadata.notification_defaults = [{ type: 'slack' }];
+  if (form.include_all_repos) metadata.include_all_repository_aliases_by_default = true;
+  const aliasList = form.default_aliases.split(',').map((s) => s.trim()).filter(Boolean);
+  if (aliasList.length) metadata.default_repository_aliases = aliasList;
+
+  const baseNotifs = base?.metadata?.notification_defaults ?? [];
+  const nonSlack = baseNotifs.filter((n) => n.type !== 'slack');
+  const existingSlack = baseNotifs.find((n) => n.type === 'slack');
+  const notifs = [
+    ...nonSlack,
+    ...(form.notify_slack ? [existingSlack ?? { type: 'slack' }] : []),
+  ];
+  if (notifs.length) metadata.notification_defaults = notifs;
+  else delete metadata.notification_defaults;
+
+  const model = base && typeof base.model === 'object'
+    ? { ...base.model, id: form.model }
+    : form.model;
+
   return {
     type: 'agent',
     id: form.id.trim(),
     version: form.version,
     name: form.name.trim(),
     description: form.description.trim() || undefined,
-    model: form.model,
+    model,
     system: form.system,
     tools: form.tools,
     skills: form.skills,
     response_format: form.response_format || undefined,
+    ...(base?.response_formats ? { response_formats: base.response_formats } : {}),
     metadata,
   };
 }
@@ -81,6 +100,7 @@ export function AgentBuilder() {
   const { data: catalog } = useCatalog();
 
   const [form, setForm] = useState<FormState>(BLANK);
+  const [base, setBase] = useState<AgentConfig | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [preview, setPreview] = useState<AgentPreview | null>(null);
   const [published, setPublished] = useState<PublishResult | null>(null);
@@ -103,12 +123,13 @@ export function AgentBuilder() {
           state.version = 1;
         }
         setForm(state);
+        setBase(agent.config);
       }
     }
     setLoaded(true);
   }, [catalog, editId, cloneFrom, loaded]);
 
-  const config = useMemo(() => toConfig(form), [form]);
+  const config = useMemo(() => toConfig(form, base), [form, base]);
 
   // Live preview — the server is the single source of truth for validation
   // and canonical YAML.
@@ -227,6 +248,9 @@ export function AgentBuilder() {
                 <div className="field">
                   <label htmlFor="b-model">Model</label>
                   <select id="b-model" value={form.model} onChange={(e) => set('model', e.target.value)}>
+                    {!MODEL_CHOICES.includes(form.model) && form.model && (
+                      <option value={form.model}>{form.model} (current)</option>
+                    )}
                     {MODEL_CHOICES.map((m) => <option key={m} value={m}>{m}</option>)}
                   </select>
                   <div className="help">Executed by the runtime's Gemini CLI provider; the key lives in Vault.</div>
@@ -306,17 +330,18 @@ export function AgentBuilder() {
               <div className="form-row">
                 <div className="field">
                   <label htmlFor="b-repos">Repositories cloned into the workspace</label>
-                  <select id="b-repos" value={form.repo_mode}
-                    onChange={(e) => set('repo_mode', e.target.value as FormState['repo_mode'])}>
-                    <option value="none">None unless the request asks</option>
-                    <option value="defaults">A default list</option>
-                    <option value="all">Every repository in the catalog</option>
-                  </select>
-                  {form.repo_mode === 'defaults' && (
-                    <input type="text" className="mono" style={{ marginTop: 8 }} value={form.default_aliases}
-                      onChange={(e) => set('default_aliases', e.target.value)}
-                      placeholder="credible-dbt, airflow-utils" />
-                  )}
+                  <label className="check-row">
+                    <input type="checkbox" checked={form.include_all_repos}
+                      onChange={(e) => set('include_all_repos', e.target.checked)} />
+                    Clone every repository in the catalog
+                    <span className="desc">— include_all_repository_aliases_by_default</span>
+                  </label>
+                  <input id="b-repos" type="text" className="mono" style={{ marginTop: 8 }}
+                    value={form.default_aliases}
+                    onChange={(e) => set('default_aliases', e.target.value)}
+                    placeholder="default aliases: credible-dbt, airflow-utils"
+                    disabled={form.include_all_repos} />
+                  <div className="help">Requests can always narrow this with an explicit resources list.</div>
                 </div>
                 <div className="field">
                   <label>Notifications</label>

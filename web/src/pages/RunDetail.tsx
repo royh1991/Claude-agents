@@ -16,7 +16,9 @@ export function RunDetail() {
     dagRunId ? `/api/runs/${encodeURIComponent(dagRunId)}` : null, 3000);
   const { data: catalog } = useCatalog();
 
-  if (error) return <div className="alert error">Couldn't load the run: {error}</div>;
+  // Only hard-fail when we have nothing to show; a transient poll error
+  // must not blank a page that already has data.
+  if (error && !data) return <div className="alert error">Couldn't load the run: {error}</div>;
   if (!data || !catalog) return null;
   const { run, tasks, result } = data;
   const agent = catalog.agents.find((a) => a.id === run.agent_id);
@@ -26,7 +28,16 @@ export function RunDetail() {
   async function rerun() {
     setRerunError(null);
     try {
-      const out = await api.post<{ dag_run_id: string }>('/api/runs', { envelope: run.conf });
+      // Re-pin to the agent's *current* version: the original conf pins the
+      // version at submission time, which the backend rejects after a bump.
+      const envelope = { ...run.conf } as Record<string, unknown> & { agent?: { id: string; version?: number } };
+      if (envelope.agent) {
+        envelope.agent = { ...envelope.agent };
+        const current = agent?.config?.version;
+        if (current != null) envelope.agent.version = current;
+        else delete envelope.agent.version;
+      }
+      const out = await api.post<{ dag_run_id: string }>('/api/runs', { envelope });
       navigate(`/runs/${encodeURIComponent(out.dag_run_id)}`);
     } catch (e) {
       setRerunError(describeError(e));

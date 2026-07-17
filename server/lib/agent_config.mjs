@@ -54,19 +54,24 @@ export function validateAgentConfig(config, catalog) {
     }
   }
 
+  // The checked-in packs (and the backend contract) use plain strings for
+  // both lists; object forms would be emitted verbatim into agent.yaml and
+  // misread by the backend, so reject them outright.
   const knownTools = new Set((catalog?.tools ?? []).map((t) => t.name));
   for (const tool of config.tools ?? []) {
-    const name = typeof tool === 'string' ? tool : tool?.name;
-    if (!knownTools.has(name)) {
-      problems.push(`tools: "${name}" is not a supported tool handler (available: ${[...knownTools].join(', ') || 'none'})`);
+    if (typeof tool !== 'string') {
+      problems.push('tools: entries must be plain handler-name strings');
+    } else if (!knownTools.has(tool)) {
+      problems.push(`tools: "${tool}" is not a supported tool handler (available: ${[...knownTools].join(', ') || 'none'})`);
     }
   }
 
   const knownSkills = new Set((catalog?.skills ?? []).map((s) => s.id));
   for (const skill of config.skills ?? []) {
-    const id = typeof skill === 'string' ? skill : skill?.skill_id;
-    if (!knownSkills.has(id)) {
-      problems.push(`skills: "${id}" not found in skills/ (available: ${[...knownSkills].join(', ') || 'none'})`);
+    if (typeof skill !== 'string') {
+      problems.push('skills: entries must be plain skill-stem strings');
+    } else if (!knownSkills.has(skill)) {
+      problems.push(`skills: "${skill}" not found in skills/ (available: ${[...knownSkills].join(', ') || 'none'})`);
     }
   }
 
@@ -75,7 +80,7 @@ export function validateAgentConfig(config, catalog) {
   if (config.response_format != null) {
     if (typeof config.response_format !== 'string') {
       problems.push('response_format: must be a string naming a response format');
-    } else if (!knownFormats.has(config.response_format) && !(config.response_format in inlineFormats)) {
+    } else if (!knownFormats.has(config.response_format) && !Object.hasOwn(inlineFormats, config.response_format)) {
       problems.push(`response_format: "${config.response_format}" not found in response_formats/ (available: ${[...knownFormats].join(', ')})`);
     }
   }

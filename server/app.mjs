@@ -149,12 +149,14 @@ export function createApp(env = process.env) {
   // ------------------------------------------------------------- runs
 
   app.post('/api/runs', async (req, res) => {
-    const envelope = req.body?.envelope;
-    const problems = validateSessionEnvelope(envelope, catalog());
-    if (problems.length) {
-      return apiError(res, 400, 'invalid_envelope_error', 'the session envelope has problems', problems);
-    }
+    // Everything inside the try: express 4 does not catch rejected async
+    // handlers, so a validator surprise must never escape this scope.
     try {
+      const envelope = req.body?.envelope;
+      const problems = validateSessionEnvelope(envelope, catalog());
+      if (problems.length) {
+        return apiError(res, 400, 'invalid_envelope_error', 'the session envelope has problems', problems);
+      }
       const out = await runs.trigger(envelope);
       res.json({ ...out, mode: runs.mode });
     } catch (err) {
@@ -233,6 +235,13 @@ export function createApp(env = process.env) {
     app.use(express.static(webDist));
     app.get(/^(?!\/api\/).*/, (req, res) => res.sendFile(path.join(webDist, 'index.html')));
   }
+
+  // Catch-all: a bug in any synchronous handler becomes a 500 payload,
+  // never a hung request.
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, req, res, next) => {
+    apiError(res, 500, 'internal_error', String(err?.message ?? err));
+  });
 
   return app;
 }

@@ -15,7 +15,8 @@ export function AgentDetail() {
   const [title, setTitle] = useState('');
   const [message, setMessage] = useState('');
   const [format, setFormat] = useState<string | null>(null);
-  const [aliases, setAliases] = useState<string | null>(null);
+  const [repoMode, setRepoMode] = useState<'default' | 'custom' | 'none'>('default');
+  const [aliases, setAliases] = useState('');
   const [metadataText, setMetadataText] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -41,17 +42,24 @@ export function AgentDetail() {
         return;
       }
     }
-    const aliasList = (aliases ?? defaultAliases).split(',').map((s) => s.trim()).filter(Boolean);
     const envelope: SessionEnvelope = {
       type: 'session',
       agent: { type: 'agent', id: config.id, version: config.version },
-      environment_id: catalog!.environments[0]?.id ?? 'airflow-triage-runtime',
+      environment_id: 'airflow-triage-runtime',
       title: title.trim() || null,
-      resources: aliasList.map((alias) => ({ type: 'repository_alias', alias })),
       metadata,
       events: [{ type: 'user.message', content: [{ type: 'text', text: message.trim() }] }],
       ...(responseFormat ? { response_format: responseFormat } : {}),
     };
+    // Contract: omitting `resources` uses the agent's defaults, while an
+    // explicit [] means clone nothing — so only include the key when the
+    // user overrode the default behavior.
+    if (repoMode === 'none') {
+      envelope.resources = [];
+    } else if (repoMode === 'custom') {
+      envelope.resources = aliases.split(',').map((s) => s.trim()).filter(Boolean)
+        .map((alias) => ({ type: 'repository_alias', alias }));
+    }
     setSubmitting(true);
     try {
       const out = await api.post<{ dag_run_id: string }>('/api/runs', { envelope });
@@ -109,10 +117,24 @@ export function AgentDetail() {
           </div>
           <div className="form-row">
             <div className="field">
-              <label htmlFor="r-repos">Repositories to clone (aliases, comma-separated)</label>
-              <input id="r-repos" type="text" className="mono" value={aliases ?? defaultAliases}
-                onChange={(e) => setAliases(e.target.value)} placeholder="credible-dbt" />
-              <div className="help">Must exist in the repository catalog Airflow passes to the pod.</div>
+              <label htmlFor="r-repos">Repositories to clone</label>
+              <select id="r-repos" value={repoMode}
+                onChange={(e) => setRepoMode(e.target.value as typeof repoMode)}>
+                <option value="default">
+                  Agent default — {config.metadata?.include_all_repository_aliases_by_default
+                    ? 'all catalog repositories'
+                    : defaultAliases || 'none'}
+                </option>
+                <option value="custom">A custom list</option>
+                <option value="none">None — clone nothing</option>
+              </select>
+              {repoMode === 'custom' && (
+                <input type="text" className="mono" style={{ marginTop: 8 }} value={aliases}
+                  onChange={(e) => setAliases(e.target.value)}
+                  placeholder="credible-dbt, airflow-utils"
+                  aria-label="Repository aliases, comma-separated" />
+              )}
+              <div className="help">Aliases must exist in the repository catalog Airflow passes to the pod.</div>
             </div>
             <div className="field">
               <label htmlFor="r-meta">Metadata (JSON, optional)</label>

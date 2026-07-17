@@ -27,9 +27,10 @@ export function validateSessionEnvelope(envelope, catalog) {
   if (envelope.agent?.type != null && envelope.agent.type !== 'agent') {
     problems.push('agent.type: must be "agent" when present');
   }
-  const envIds = new Set((catalog?.environments ?? []).map((e) => e.id));
-  if (envelope.environment_id != null && !envIds.has(envelope.environment_id)) {
-    problems.push(`environment_id: "${envelope.environment_id}" is not an accepted environment (${[...envIds].join(', ')})`);
+  // The backend's load_environment accepts exactly this id today, regardless
+  // of what exists under environments/ — mirror that, not the directory.
+  if (envelope.environment_id != null && envelope.environment_id !== 'airflow-triage-runtime') {
+    problems.push(`environment_id: "${envelope.environment_id}" is not accepted — only "airflow-triage-runtime" exists`);
   }
   const events = envelope.events;
   if (!Array.isArray(events) || events.length === 0) {
@@ -40,11 +41,20 @@ export function validateSessionEnvelope(envelope, catalog) {
         problems.push(`events[${i}].type: v1 supports only "user.message"`);
         return;
       }
-      const texts = (event.content ?? []).filter((b) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim());
+      // The validator must be total over arbitrary JSON — a malformed
+      // request may never throw out of the route handler.
+      if (!Array.isArray(event.content)) {
+        problems.push(`events[${i}].content: must be an array of content blocks`);
+        return;
+      }
+      const texts = event.content.filter((b) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim());
       if (texts.length === 0) problems.push(`events[${i}]: needs at least one non-empty text content block`);
     });
   }
-  for (const [i, resource] of (envelope.resources ?? []).entries()) {
+  if (envelope.resources != null && !Array.isArray(envelope.resources)) {
+    problems.push('resources: must be an array');
+  }
+  for (const [i, resource] of (Array.isArray(envelope.resources) ? envelope.resources : []).entries()) {
     if (resource?.type === 'repository_alias') {
       if (!resource.alias) problems.push(`resources[${i}]: repository_alias needs an "alias"`);
     } else if (resource?.type !== 'dbt_artifacts') {
@@ -89,7 +99,9 @@ export class AirflowAdapter {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`Airflow ${method} ${pathname} → ${res.status}: ${text.slice(0, 300)}`);
+      const err = new Error(`Airflow ${method} ${pathname} → ${res.status}: ${text.slice(0, 300)}`);
+      err.status = res.status;
+      throw err;
     }
     return res.json();
   }
@@ -97,10 +109,11 @@ export class AirflowAdapter {
   async trigger(envelope) {
     const agentId = envelope.agent?.id ?? 'agent';
     const dagRunId = `console__${agentId}__${new Date().toISOString().replace(/[:.]/g, '-')}__${crypto.randomBytes(3).toString('hex')}`;
+    // Body stays exactly {dag_run_id, conf}: Airflow's schema rejects
+    // unknown fields, and e.g. `note` only exists from 2.5 onward.
     const created = await this.#call('POST', `/dags/${this.dagId}/dagRuns`, {
       dag_run_id: dagRunId,
       conf: envelope,
-      note: 'triggered from the agent console',
     });
     return { dag_run_id: created.dag_run_id };
   }
@@ -125,14 +138,28 @@ export class AirflowAdapter {
         try_number: t.try_number,
       }));
     let result = null;
+    let resultRaw = null;
     try {
       const xcom = await this.#call('GET',
         `/dags/${this.dagId}/dagRuns/${encoded}/taskInstances/run-agent/xcomEntries/return_value`);
-      result = typeof xcom.value === 'string' ? JSON.parse(xcom.value) : xcom.value;
-    } catch {
-      // no XCom yet (run still executing, or run-agent never ran)
+      if (typeof xcom.value === 'string') {
+        try {
+          result = JSON.parse(xcom.value);
+        } catch {
+          // Not JSON (unexpected serialization) — surface it raw rather
+          // than silently dropping the run's output.
+          resultRaw = xcom.value;
+        }
+      } else {
+        result = xcom.value ?? null;
+      }
+    } catch (err) {
+      // Only "no XCom yet" (run still executing / run-agent never ran) is
+      // benign. Auth or server errors must surface, not masquerade as a
+      // still-running result.
+      if (err.status !== 404) throw err;
     }
-    return { run: this.#summary(run), tasks, result };
+    return { run: this.#summary(run), tasks, result, result_raw: resultRaw };
   }
 
   #summary(run) {
@@ -244,7 +271,7 @@ export class MockAdapter {
       ?? null;
     const format = catalog.response_formats.find((f) => f.name === formatName);
     let result;
-    if (formatName && MOCK_RESULTS[formatName]) {
+    if (formatName && Object.hasOwn(MOCK_RESULTS, formatName)) {
       result = MOCK_RESULTS[formatName](envelope);
     } else if (format?.schema) {
       result = instanceFromSchema(format.schema, 'Mock');
