@@ -255,8 +255,9 @@ export function instanceFromSchema(schema, seedText = 'Mock value') {
 
 // Mock outputs conform to the BACKEND's response format schemas (evidence,
 // findings, etc. are arrays of strings — see the fixture schemas). The mock
-// bends to the schema, never the schema to the mock.
-const MOCK_RESULTS = {
+// bends to the schema, never the schema to the mock. Exported so the test
+// suite can assert exactly that.
+export const MOCK_RESULTS = {
   failure_triage_report: (conf) => ({
     title: `Triage: ${conf.metadata?.dag_id ?? 'dw_core_load'} failed at ${conf.metadata?.task_id ?? 'load_fct_orders'}`,
     summary: "Today's orders export contains the literal string 'N/A' in amount; COPY INTO fct_orders_stage fails with Snowflake error 100038. Yesterday's load on the same code succeeded, so this is an upstream export regression, not a warehouse change.",
@@ -285,6 +286,13 @@ const MOCK_RESULTS = {
     findings: [
       'refund_rate: 4.1% vs 1.9% weekday baseline (z = 3.6), sustained across the full day — driver: web platform, NA region (82% of the excess)',
       'gross_revenue: within baseline (z = 0.4)',
+    ],
+    suspected_causes: [
+      'Payments incident on the web checkout flow starting 14:00 UTC (matches the refund spike onset)',
+    ],
+    evidence: [
+      'refund_rate by region/platform: web/NA at 6.8% vs 1.7% elsewhere for the same day',
+      '28-day weekday baseline: mean 1.9%, MAD 0.3% — observed 4.1% is z = 3.6',
     ],
     query_proof: [
       "SELECT metric, ds, value FROM analytics.metric_daily WHERE ds >= DATEADD('day', -35, CURRENT_DATE)",

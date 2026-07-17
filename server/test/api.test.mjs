@@ -301,3 +301,36 @@ test('regression: only airflow-triage-runtime is an accepted environment', async
   assert.equal(bad.status, 400);
   assert.match(bad.body.error.details.join('\n'), /only "airflow-triage-runtime"/);
 });
+
+test('guard: every mock result validates against its fixture schema', async () => {
+  const { MOCK_RESULTS } = await import('../lib/runs.mjs');
+  const cat = (await call('GET', '/api/catalog')).body;
+  const conf = { metadata: { dag_id: 'dbt-core', task_id: 'run', dbt_asset: 'fct_orders', grain: 'day' } };
+  for (const [name, generate] of Object.entries(MOCK_RESULTS)) {
+    const schema = cat.response_formats.find((f) => f.name === name)?.schema;
+    assert.ok(schema, `mock "${name}" has no fixture response format`);
+    assert.deepEqual(validateInstance(generate(conf), schema), [],
+      `mock "${name}" output does not satisfy its response format schema`);
+  }
+});
+
+// When a real backend checkout is available (REAL_BACKEND_ROOT), assert the
+// fixture schemas match it exactly and the mocks satisfy the REAL contract.
+const realRoot = process.env.REAL_BACKEND_ROOT;
+test('guard: fixture response formats match the real backend', { skip: !realRoot }, async () => {
+  const YAML_ = (await import('yaml')).default;
+  const { MOCK_RESULTS } = await import('../lib/runs.mjs');
+  const realDir = path.join(realRoot, 'dags/credible_bi_airflow_triage/response_formats');
+  const conf = { metadata: {} };
+  for (const file of fs.readdirSync(realDir).filter((f) => /\.ya?ml$/.test(f))) {
+    const real = YAML_.parse(fs.readFileSync(path.join(realDir, file), 'utf8'));
+    const fixtureFile = path.join(fixtureRoot, 'dags/credible_bi_airflow_triage/response_formats', file);
+    assert.ok(fs.existsSync(fixtureFile), `fixture missing ${file}`);
+    const fixture = YAML_.parse(fs.readFileSync(fixtureFile, 'utf8'));
+    assert.deepEqual(fixture, real, `${file}: fixture diverges from the backend — fix the fixture, never the backend`);
+    if (Object.hasOwn(MOCK_RESULTS, real.name)) {
+      assert.deepEqual(validateInstance(MOCK_RESULTS[real.name](conf), real.schema), [],
+        `mock "${real.name}" fails the REAL backend schema`);
+    }
+  }
+});

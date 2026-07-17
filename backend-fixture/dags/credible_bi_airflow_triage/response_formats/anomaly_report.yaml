@@ -8,7 +8,7 @@ schema:
     - summary
     - anomaly_detected
     - findings
-    - query_proof
+    - evidence
     - recommended_actions
     - severity
     - confidence
@@ -20,6 +20,10 @@ schema:
     anomaly_detected:
       type: boolean
     findings:
+      type: array
+      items:
+        type: string
+    suspected_causes:
       type: array
       items:
         type: string
