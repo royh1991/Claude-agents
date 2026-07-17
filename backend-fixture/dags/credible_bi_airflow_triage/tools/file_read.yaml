@@ -1,0 +1,15 @@
+type: custom
+name: file_read
+description: |
+  Read a workspace-relative text file. Blocks `.git` paths and path
+  traversal; output truncates at 20000 characters.
+permission_policy:
+  type: always_allow
+input_schema:
+  type: object
+  additionalProperties: false
+  required: [path]
+  properties:
+    path:
+      type: string
+      minLength: 1

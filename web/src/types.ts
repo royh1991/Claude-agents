@@ -1,136 +1,225 @@
-export interface ModelRef {
-  id: string;
-  provider: 'google' | 'anthropic' | 'openai';
-}
+// Shapes mirror the backend contract (credible-bi-airflow-triage CLAUDE.md)
+// and the console server's /api surface.
 
-export interface McpServer {
-  name: string;
-  url: string;
-  tools: string[];
-}
+export type ModelField = string | { provider?: string; id: string };
 
-export interface Agent {
-  id: string;
+export interface AgentConfig {
   type: 'agent';
-  name: string;
-  description: string | null;
-  model: ModelRef;
-  system: string | null;
-  tools: { type: string; config?: Record<string, boolean> }[];
-  mcp_servers: McpServer[];
-  skills: unknown[];
-  metadata: Record<string, unknown>;
+  id: string;
   version: number;
-  created_at: string;
-  updated_at: string;
-  archived_at: string | null;
-}
-
-export interface Credential {
   name: string;
-  type: string;
-  detail?: string;
-}
-
-export interface Environment {
-  id: string;
-  type: 'environment';
-  name: string;
-  config: {
-    type: string;
-    cluster: string | null;
-    namespace: string | null;
-    network_policy: string;
-    credentials: Credential[];
+  description?: string | null;
+  model: ModelField;
+  system: string;
+  tools?: (string | { name: string })[];
+  skills?: (string | { skill_id: string })[];
+  response_format?: string | null;
+  response_formats?: { default?: string; formats?: Record<string, unknown> };
+  metadata?: {
+    owner_team?: string;
+    default_repository_aliases?: string[];
+    include_all_repository_aliases_by_default?: boolean;
+    notification_defaults?: { type: string; channel?: string }[];
+    [key: string]: unknown;
   };
-  worker: { status: string; last_seen_at: string | null; worker_id: string | null };
-  created_at: string;
-  archived_at: string | null;
 }
 
-export type SessionStatus = 'queued' | 'running' | 'idle' | 'terminated';
-
-export interface Session {
+export interface CatalogAgent {
   id: string;
+  path: string;
+  raw: string;
+  config: AgentConfig | null;
+  parse_error: string | null;
+  dir_mismatch: string | null;
+}
+
+export interface Skill {
+  id: string;
+  title: string;
+  body: string;
+}
+
+export interface SubsetSchema {
+  type?: string;
+  enum?: unknown[];
+  required?: string[];
+  properties?: Record<string, SubsetSchema>;
+  additionalProperties?: boolean;
+  minItems?: number;
+  minLength?: number;
+  minimum?: number;
+  maximum?: number;
+  items?: SubsetSchema;
+  description?: string;
+  default?: unknown;
+}
+
+export interface Tool {
+  name: string;
+  description: string;
+  permission_policy: { type: string } | null;
+  input_schema: SubsetSchema | null;
+  parse_error: string | null;
+}
+
+export interface ResponseFormat {
+  name: string;
+  schema: SubsetSchema | null;
+  raw: string;
+  parse_error: string | null;
+}
+
+export interface EnvironmentDoc {
+  id: string;
+  config: Record<string, unknown> | null;
+  raw: string;
+  parse_error: string | null;
+}
+
+export interface TriggerDoc {
+  id: string;
+  config: Record<string, unknown> | null;
+  raw: string;
+  parse_error: string | null;
+}
+
+export interface Catalog {
+  backend: {
+    repo_root: string;
+    package_dir: string;
+    using_fixture: boolean;
+    package_exists: boolean;
+  };
+  agents: CatalogAgent[];
+  skills: Skill[];
+  tools: Tool[];
+  response_formats: ResponseFormat[];
+  environments: EnvironmentDoc[];
+  triggers: TriggerDoc[];
+  guardrails: string | null;
+  run_mode: 'mock' | 'airflow';
+  result_statuses: string[];
+}
+
+// ---- runs
+
+export interface SessionEnvelope {
   type: 'session';
-  agent: { id: string; version: number };
-  environment_id: string;
+  agent: { type?: 'agent'; id: string; version?: number };
+  environment_id?: string;
+  title?: string | null;
+  resources?: ({ type: 'repository_alias'; alias: string } | { type: 'dbt_artifacts'; [k: string]: unknown })[];
+  metadata?: Record<string, unknown>;
+  events: { type: 'user.message'; content: { type: 'text'; text: string }[] }[];
+  response_format?: string;
+  notifications?: { type: string }[];
+}
+
+export type RunState = 'queued' | 'running' | 'success' | 'failed';
+
+export interface RunSummary {
+  dag_run_id: string;
+  state: RunState;
+  agent_id: string | null;
   title: string | null;
-  status: SessionStatus;
-  stop_reason: string | null;
-  interrupt_requested: boolean;
-  usage: { input_tokens: number; output_tokens: number };
-  deployment_run_id: string | null;
-  last_error: { type: string; message: string } | null;
-  created_at: string;
-  updated_at: string;
-  last_event_at: string | null;
+  response_format: string | null;
+  logical_date: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  conf: Partial<SessionEnvelope> & Record<string, unknown>;
 }
 
-export interface SessionEvent {
-  id: string;
-  type: string;
-  created_at: string;
-  content?: { type: string; text: string }[];
-  name?: string;
-  tool?: string;
-  server?: string;
-  input?: unknown;
-  output?: unknown;
-  stop_reason?: string;
-  error?: { type: string; message: string; retry_status?: string };
-  model?: string;
-  model_usage?: { input_tokens: number; output_tokens: number };
-  worker_id?: string;
+export interface TaskInstance {
+  task_id: string;
+  state: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  try_number: number;
 }
 
-export interface Deployment {
-  id: string;
-  type: 'deployment';
-  name: string;
-  agent: string;
+export type ResultStatus =
+  | 'success' | 'invalid_input' | 'resource_error'
+  | 'provider_error' | 'invalid_output' | 'runtime_error';
+
+export interface ResultEnvelope {
+  agent_id: string;
+  agent_name: string;
+  status: ResultStatus;
+  result: Record<string, unknown> | null;
+  error: { code: string; message: string } | null;
+  raw_output: string;
+  session_id: string;
   environment_id: string;
-  initial_events: { type: string; content: { type: string; text: string }[] }[];
-  schedule: {
-    type: 'cron';
-    expression: string;
-    timezone: string;
-    last_run_at: string | null;
-    upcoming_runs_at: string[];
-  };
-  status: 'active' | 'paused' | 'archived';
-  paused_reason: { type: string; error?: { type: string; message: string } } | null;
-  created_at: string;
+  agent_version: number;
+  resource_context: { workspace_root: string; repositories: { alias: string; path: string }[] } | null;
+  provider: { kind: string };
 }
 
-export interface DeploymentRun {
-  id: string;
-  type: 'deployment_run';
-  deployment_id: string;
-  trigger_context: { type: 'schedule' | 'manual'; scheduled_at?: string };
-  session_id: string | null;
-  error: { type: string; message: string } | null;
-  agent: { type: 'agent'; id: string; version: number } | null;
-  created_at: string;
+export interface RunDetail {
+  run: RunSummary;
+  tasks: TaskInstance[];
+  result: ResultEnvelope | null;
+  mode: 'mock' | 'airflow';
 }
 
-export interface ProviderKey {
-  id: string;
-  provider: 'google' | 'anthropic' | 'openai';
-  name: string;
-  masked_value: string;
-  created_at: string;
-  last_used_at: string | null;
-}
-
-export interface Overview {
-  active_sessions: number;
-  sessions_today: number;
-  success_rate_7d: number | null;
-  session_hours_7d: number;
+export interface OverviewData {
   agents_count: number;
-  deployments_active: number;
-  sessions_per_day: { date: string; count: number }[];
-  recent_sessions: Session[];
-  upcoming_runs: { deployment_id: string; name: string; at: string }[];
+  skills_count: number;
+  tools_count: number;
+  response_formats_count: number;
+  triggers_count: number;
+  runs_7d: number;
+  green_rate_7d: number | null;
+  active_runs: number;
+  recent_runs: RunSummary[];
+  run_mode: 'mock' | 'airflow';
+  runs_error: string | null;
+  backend: Catalog['backend'];
+}
+
+// ---- authoring
+
+export interface AgentPreview {
+  yaml: string | null;
+  problems: string[];
+  warnings: string[];
+  exists: boolean;
+  existing_version: number | null;
+}
+
+export interface PublishResult {
+  path: string;
+  yaml: string;
+  previous_yaml: string | null;
+  warnings?: string[];
+  next_steps: string;
+}
+
+export interface TriggerConfig {
+  type: 'trigger';
+  id: string;
+  description?: string;
+  agent: { id: string; version?: number };
+  source: { event: 'on_failure' | 'on_success' | 'schedule' | 'manual'; dag_id?: string; schedule?: { cron: string; timezone: string } };
+  request: {
+    title?: string;
+    response_format?: string;
+    resources?: { type: 'repository_alias'; alias: string }[];
+    metadata?: Record<string, unknown>;
+    message: string;
+  };
+  notifications?: { type: string }[];
+}
+
+export function modelId(model: ModelField | undefined | null): string {
+  if (!model) return '—';
+  return typeof model === 'string' ? model : model.id;
+}
+
+export function toolName(tool: string | { name: string }): string {
+  return typeof tool === 'string' ? tool : tool.name;
+}
+
+export function skillId(skill: string | { skill_id: string }): string {
+  return typeof skill === 'string' ? skill : skill.skill_id;
 }

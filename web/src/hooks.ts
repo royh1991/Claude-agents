@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
+import type { Catalog } from './types';
 
 export function useFetch<T>(path: string | null, pollMs?: number) {
   const [data, setData] = useState<T | null>(null);
@@ -41,16 +42,14 @@ export function useFetch<T>(path: string | null, pollMs?: number) {
   return { data, error, reload };
 }
 
-export function useAgentIndex() {
-  const { data } = useFetch<{ data: { id: string; name: string; model: { id: string } }[] }>('/v1/agents?include_archived=true');
-  const index = new Map<string, { name: string; model: string }>();
-  for (const agent of data?.data ?? []) index.set(agent.id, { name: agent.name, model: agent.model.id });
-  return index;
+export function useCatalog() {
+  return useFetch<Catalog>('/api/catalog');
 }
 
-export function useEnvironmentIndex() {
-  const { data } = useFetch<{ data: { id: string; name: string }[] }>('/v1/environments');
+export function agentNameIndex(catalog: Catalog | null): Map<string, string> {
   const index = new Map<string, string>();
-  for (const env of data?.data ?? []) index.set(env.id, env.name);
+  for (const agent of catalog?.agents ?? []) {
+    index.set(agent.id, agent.config?.name ?? agent.id);
+  }
   return index;
 }

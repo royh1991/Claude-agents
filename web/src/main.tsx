@@ -5,12 +5,12 @@ import { Layout } from './components/Layout';
 import { Overview } from './pages/Overview';
 import { Agents } from './pages/Agents';
 import { AgentDetail } from './pages/AgentDetail';
-import { AgentForm } from './pages/AgentForm';
-import { Sessions } from './pages/Sessions';
-import { SessionDetail } from './pages/SessionDetail';
-import { Environments, EnvironmentDetail } from './pages/Environments';
-import { Deployments, DeploymentDetail, DeploymentForm } from './pages/Deployments';
-import { Settings } from './pages/Settings';
+import { AgentBuilder } from './pages/AgentBuilder';
+import { Runs } from './pages/Runs';
+import { RunDetail } from './pages/RunDetail';
+import { Triggers } from './pages/Triggers';
+import { Library } from './pages/Library';
+import { EnvironmentPage } from './pages/EnvironmentPage';
 import './styles.css';
 
 const router = createBrowserRouter([
@@ -19,17 +19,14 @@ const router = createBrowserRouter([
     children: [
       { path: '/', element: <Overview /> },
       { path: '/agents', element: <Agents /> },
-      { path: '/agents/new', element: <AgentForm /> },
+      { path: '/agents/new', element: <AgentBuilder /> },
       { path: '/agents/:id', element: <AgentDetail /> },
-      { path: '/agents/:id/edit', element: <AgentForm /> },
-      { path: '/sessions', element: <Sessions /> },
-      { path: '/sessions/:id', element: <SessionDetail /> },
-      { path: '/environments', element: <Environments /> },
-      { path: '/environments/:id', element: <EnvironmentDetail /> },
-      { path: '/deployments', element: <Deployments /> },
-      { path: '/deployments/new', element: <DeploymentForm /> },
-      { path: '/deployments/:id', element: <DeploymentDetail /> },
-      { path: '/settings', element: <Settings /> },
+      { path: '/agents/:id/edit', element: <AgentBuilder /> },
+      { path: '/runs', element: <Runs /> },
+      { path: '/runs/:dagRunId', element: <RunDetail /> },
+      { path: '/triggers', element: <Triggers /> },
+      { path: '/library', element: <Library /> },
+      { path: '/environment', element: <EnvironmentPage /> },
     ],
   },
 ]);

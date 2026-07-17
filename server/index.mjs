@@ -1,28 +1,12 @@
-import { Store } from './lib/store.mjs';
 import { createApp } from './app.mjs';
-import { seed } from './seed.mjs';
+import { resolveBackendPaths } from './lib/catalog.mjs';
 
 const PORT = Number(process.env.PORT ?? 8081);
-
-const store = new Store();
-if (store.isEmpty()) {
-  seed(store);
-  console.log('[gantry] seeded demo workspace');
-}
-
-const app = createApp(store);
-
-// Scheduler loop: fires due deployments (the console-side bookkeeping only —
-// actual execution happens when an Airflow worker claims the queued session).
-setInterval(() => {
-  try {
-    app.locals.tickSchedules();
-    app.locals.sweepStaleClaims();
-  } catch (err) {
-    console.error('[gantry] scheduler tick failed:', err);
-  }
-}, 20000);
+const app = createApp(process.env);
+const paths = resolveBackendPaths(process.env);
 
 app.listen(PORT, () => {
-  console.log(`[gantry] control plane listening on http://localhost:${PORT}`);
+  console.log(`[gantry] console server on http://localhost:${PORT}`);
+  console.log(`[gantry] backend package: ${paths.packageRoot}${paths.usingFixture ? ' (bundled fixture — set BACKEND_REPO_ROOT for a real checkout)' : ''}`);
+  console.log(`[gantry] run mode: ${process.env.AIRFLOW_BASE_URL ? `airflow (${process.env.AIRFLOW_BASE_URL})` : 'mock (set AIRFLOW_BASE_URL to proxy a real Airflow)'}`);
 });

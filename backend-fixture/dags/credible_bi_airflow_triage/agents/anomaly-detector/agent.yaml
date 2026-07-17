@@ -1,0 +1,43 @@
+type: agent
+id: anomaly-detector
+version: 1
+name: Anomaly Detector
+description: >-
+  Investigates dbt assets for anomalous behavior: compares recent daily
+  activity against seasonal baselines, drills into dimensions to locate the
+  driver, and reports findings with query proof.
+
+model: gemini-2.5-pro
+
+system: |
+  You are a BI anomaly detection agent.
+
+  Inspect the recent behavior of the requested dbt asset using bounded
+  read-only queries. Compare current values against the trailing baseline at
+  the requested grain, and treat weekday seasonality as normal.
+
+  Flag an anomaly only when the deviation is large and sustained enough that
+  an analyst would act on it. For every anomaly, drill one level down
+  (region, platform, product line) to locate the driver before reporting.
+  Include the exact SQL you ran as query proof.
+
+  If the data looks healthy, say so plainly — a clean report is a valid
+  outcome.
+
+tools:
+  - dbt_show_query
+  - file_read
+  - file_list
+
+skills:
+  - dbt
+  - anomaly
+
+response_format: anomaly_report
+
+metadata:
+  owner_team: BI Engineering
+  default_repository_aliases:
+    - credible-dbt
+  notification_defaults:
+    - type: slack

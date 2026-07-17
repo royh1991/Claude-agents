@@ -1,100 +1,146 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api } from '../api';
-import { useFetch, useAgentIndex, useEnvironmentIndex } from '../hooks';
-import type { Agent, Environment, Session } from '../types';
-import { ModelBadge, CopyId } from '../components/bits';
-import { SessionTable } from '../components/SessionTable';
-import { shortDateTime } from '../format';
+import { api, describeError } from '../api';
+import { useCatalog } from '../hooks';
+import { ModelBadge, SchemaTable, StatusChip, CopyId } from '../components/bits';
+import { modelId, toolName, skillId } from '../types';
+import type { SessionEnvelope } from '../types';
 
 export function AgentDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { data: agent } = useFetch<Agent>(id ? `/v1/agents/${id}` : null);
-  const { data: versions } = useFetch<{ data: Agent[] }>(id ? `/v1/agents/${id}/versions` : null);
-  const { data: sessions } = useFetch<{ data: Session[] }>(id ? `/v1/sessions?agent_id=${id}&limit=10` : null);
-  const { data: environments } = useFetch<{ data: Environment[] }>('/v1/environments');
-  const agentIndex = useAgentIndex();
-  const envIndex = useEnvironmentIndex();
-
-  const [starting, setStarting] = useState(false);
+  const { data: catalog } = useCatalog();
+  const [showYaml, setShowYaml] = useState(false);
+  const [runOpen, setRunOpen] = useState(false);
   const [title, setTitle] = useState('');
   const [message, setMessage] = useState('');
-  const [environmentId, setEnvironmentId] = useState('');
+  const [format, setFormat] = useState<string | null>(null);
+  const [aliases, setAliases] = useState<string | null>(null);
+  const [metadataText, setMetadataText] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  if (!agent) return null;
-  const activeEnvs = (environments?.data ?? []).filter((e) => !e.archived_at);
+  if (!catalog) return null;
+  const agent = catalog.agents.find((a) => a.id === id);
+  if (!agent) return <div className="alert error">Agent {id} not found in the catalog.</div>;
+  const config = agent.config;
+  const responseFormat = format ?? config?.response_format ?? '';
+  const defaultAliases = (config?.metadata?.default_repository_aliases ?? []).join(', ');
+  const schema = catalog.response_formats.find((f) => f.name === (config?.response_format ?? ''))?.schema ?? null;
 
-  async function startSession() {
-    if (!message.trim()) { setFormError('Describe the work in the first message.'); return; }
-    const envId = environmentId || activeEnvs[0]?.id;
-    if (!envId) { setFormError('Create an environment first.'); return; }
-    try {
-      const session = await api.post<Session>('/v1/sessions', {
-        agent: agent!.id,
-        environment_id: envId,
-        title: title.trim() || null,
-        initial_events: [{ type: 'user.message', content: [{ type: 'text', text: message.trim() }] }],
-      });
-      navigate(`/sessions/${session.id}`);
-    } catch (e) {
-      setFormError((e as Error).message);
+  async function startRun() {
+    if (!config) return;
+    setFormError(null);
+    if (!message.trim()) { setFormError('Describe the work in the message — it becomes the session\'s user.message event.'); return; }
+    let metadata: Record<string, unknown> | undefined;
+    if (metadataText.trim()) {
+      try {
+        metadata = JSON.parse(metadataText);
+      } catch {
+        setFormError('Metadata must be valid JSON (an object of run context, e.g. {"dbt_asset": "fct_orders"}).');
+        return;
+      }
     }
-  }
-
-  async function archive() {
-    if (!window.confirm(`Archive ${agent!.name}? The agent becomes read-only and new sessions can't reference it. This can't be undone.`)) return;
-    await api.post(`/v1/agents/${agent!.id}/archive`);
-    navigate('/agents');
+    const aliasList = (aliases ?? defaultAliases).split(',').map((s) => s.trim()).filter(Boolean);
+    const envelope: SessionEnvelope = {
+      type: 'session',
+      agent: { type: 'agent', id: config.id, version: config.version },
+      environment_id: catalog!.environments[0]?.id ?? 'airflow-triage-runtime',
+      title: title.trim() || null,
+      resources: aliasList.map((alias) => ({ type: 'repository_alias', alias })),
+      metadata,
+      events: [{ type: 'user.message', content: [{ type: 'text', text: message.trim() }] }],
+      ...(responseFormat ? { response_format: responseFormat } : {}),
+    };
+    setSubmitting(true);
+    try {
+      const out = await api.post<{ dag_run_id: string }>('/api/runs', { envelope });
+      navigate(`/runs/${encodeURIComponent(out.dag_run_id)}`);
+    } catch (e) {
+      setFormError(describeError(e));
+      setSubmitting(false);
+    }
   }
 
   return (
     <>
-      <div className="crumbs"><Link to="/agents">Agents</Link> / {agent.name}</div>
+      <div className="crumbs"><Link to="/agents">Agents</Link> / {config?.name ?? agent.id}</div>
       <div className="page-head">
         <div>
-          <h1>{agent.name}{agent.archived_at && <span className="muted"> (archived)</span>}</h1>
-          <div className="sub">{agent.description}</div>
+          <h1>{config?.name ?? agent.id}</h1>
+          <div className="sub">{config?.description}</div>
         </div>
         <div className="actions">
-          {!agent.archived_at && (
-            <>
-              <button type="button" className="btn" onClick={() => setStarting((s) => !s)}>Start session</button>
-              <Link to={`/agents/${agent.id}/edit`} className="btn">Edit</Link>
-              <button type="button" className="btn danger" onClick={archive}>Archive</button>
-            </>
-          )}
+          <button type="button" className="btn primary" onClick={() => setRunOpen((v) => !v)}>Run agent</button>
+          <Link to={`/agents/${agent.id}/edit`} className="btn">Edit</Link>
+          <button type="button" className="btn" onClick={() => setShowYaml((v) => !v)}>
+            {showYaml ? 'Hide YAML' : 'View YAML'}
+          </button>
         </div>
       </div>
 
-      {starting && (
+      {agent.parse_error && <div className="alert error">agent.yaml failed to parse: {agent.parse_error}</div>}
+      {agent.dir_mismatch && <div className="alert error">{agent.dir_mismatch}</div>}
+
+      {runOpen && config && (
         <div className="card" style={{ marginBottom: 16 }}>
-          <h2>Start a session</h2>
+          <h2>Run this agent</h2>
           {formError && <div className="alert error">{formError}</div>}
           <div className="form-row">
             <div className="field">
-              <label htmlFor="s-title">Title (optional)</label>
-              <input id="s-title" type="text" value={title} onChange={(e) => setTitle(e.target.value)}
-                placeholder="Triage: dw_core_load failed at …" />
+              <label htmlFor="r-title">Title (optional)</label>
+              <input id="r-title" type="text" value={title} onChange={(e) => setTitle(e.target.value)}
+                placeholder="ad-hoc: fct_orders revenue check" />
             </div>
             <div className="field">
-              <label htmlFor="s-env">Environment</label>
-              <select id="s-env" value={environmentId} onChange={(e) => setEnvironmentId(e.target.value)}>
-                {activeEnvs.map((env) => <option key={env.id} value={env.id}>{env.name}</option>)}
+              <label htmlFor="r-format">Response format</label>
+              <select id="r-format" value={responseFormat} onChange={(e) => setFormat(e.target.value)}>
+                {catalog.response_formats.map((f) => (
+                  <option key={f.name} value={f.name}>{f.name}</option>
+                ))}
               </select>
             </div>
           </div>
           <div className="field">
-            <label htmlFor="s-msg">First message — the work to do</label>
-            <textarea id="s-msg" value={message} onChange={(e) => setMessage(e.target.value)}
-              placeholder="Diagnose the failure of DAG …" />
-            <div className="help">The session queues until an Airflow worker in the chosen environment claims it.</div>
+            <label htmlFor="r-msg">Message — the work to do</label>
+            <textarea id="r-msg" value={message} onChange={(e) => setMessage(e.target.value)}
+              placeholder="Inspect recent daily behavior of fct_orders at day grain…" />
+            <div className="help">Sent as the session's <span className="mono">user.message</span> event.</div>
+          </div>
+          <div className="form-row">
+            <div className="field">
+              <label htmlFor="r-repos">Repositories to clone (aliases, comma-separated)</label>
+              <input id="r-repos" type="text" className="mono" value={aliases ?? defaultAliases}
+                onChange={(e) => setAliases(e.target.value)} placeholder="credible-dbt" />
+              <div className="help">Must exist in the repository catalog Airflow passes to the pod.</div>
+            </div>
+            <div className="field">
+              <label htmlFor="r-meta">Metadata (JSON, optional)</label>
+              <input id="r-meta" type="text" className="mono" value={metadataText}
+                onChange={(e) => setMetadataText(e.target.value)}
+                placeholder='{"dbt_asset": "fct_orders", "grain": "day"}' />
+            </div>
           </div>
           <div className="form-actions">
-            <button type="button" className="btn primary" onClick={startSession}>Queue session</button>
-            <button type="button" className="btn" onClick={() => setStarting(false)}>Cancel</button>
+            <button type="button" className="btn primary" onClick={startRun} disabled={submitting}>
+              {submitting ? 'Triggering…' : `Trigger ${catalog.run_mode === 'mock' ? 'mock ' : ''}run`}
+            </button>
+            <button type="button" className="btn" onClick={() => setRunOpen(false)}>Cancel</button>
+            <span className="muted small">
+              Creates a dag run of <span className="mono">ai-agent-runner</span>
+              {catalog.run_mode === 'mock' ? ' (simulated — no Airflow configured)' : ''}.
+            </span>
           </div>
+        </div>
+      )}
+
+      {showYaml && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-head-row">
+            <h2>{agent.path}</h2>
+            <CopyId id={agent.raw} />
+          </div>
+          <pre className="code">{agent.raw}</pre>
         </div>
       )}
 
@@ -102,46 +148,17 @@ export function AgentDetail() {
         <div>
           <div className="card">
             <h2>System prompt</h2>
-            <pre className="code" style={{ whiteSpace: 'pre-wrap' }}>{agent.system ?? '(none)'}</pre>
+            <pre className="code" style={{ whiteSpace: 'pre-wrap' }}>{config?.system ?? '(none)'}</pre>
           </div>
 
           <div className="card">
-            <h2>Connections</h2>
-            {agent.tools.length > 0 && (
-              <div style={{ marginBottom: 12 }}>
-                <div className="io-label muted small" style={{ marginBottom: 6 }}>Toolset</div>
-                {agent.tools.map((tool, i) => (
-                  <span key={i} className="badge" style={{ marginRight: 6 }}>
-                    {tool.type}
-                    {tool.config && `: ${Object.entries(tool.config).filter(([, v]) => v).map(([k]) => k).join(', ')}`}
-                  </span>
-                ))}
-              </div>
-            )}
-            {agent.mcp_servers.length === 0
-              ? <div className="muted small">No MCP servers attached.</div>
-              : (
-                <table className="list">
-                  <thead><tr><th>MCP server</th><th>Tools</th><th>Endpoint</th></tr></thead>
-                  <tbody>
-                    {agent.mcp_servers.map((server) => (
-                      <tr key={server.name}>
-                        <td className="primary">{server.name}</td>
-                        <td className="muted small">{server.tools.join(', ')}</td>
-                        <td className="mono muted small">{server.url}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-          </div>
-
-          <div className="card table-card">
-            <div className="card-head-row" style={{ padding: '10px 12px 0' }}>
-              <h2>Recent sessions</h2>
-              <Link to="/sessions" className="small">View all</Link>
+            <h2>Output contract — {config?.response_format ?? 'none'}</h2>
+            <SchemaTable schema={schema} />
+            <div className="help" style={{ marginTop: 8 }}>
+              The runtime injects this schema into the prompt and validates the model's
+              output against it; runs whose output doesn't match fail as
+              <span className="mono"> invalid_output</span>.
             </div>
-            <SessionTable sessions={sessions?.data ?? []} agentIndex={agentIndex} showAgent={false} />
           </div>
         </div>
 
@@ -149,35 +166,42 @@ export function AgentDetail() {
           <div className="card">
             <h2>Configuration</h2>
             <dl className="kv">
-              <dt>Model</dt><dd><ModelBadge model={agent.model} /></dd>
-              <dt>Provider</dt><dd>{agent.model.provider}</dd>
-              <dt>Version</dt><dd className="mono">v{agent.version}</dd>
-              <dt>Created</dt><dd>{shortDateTime(agent.created_at)}</dd>
-              <dt>Updated</dt><dd>{shortDateTime(agent.updated_at)}</dd>
+              <dt>Model</dt><dd><ModelBadge id={modelId(config?.model)} /></dd>
+              <dt>Version</dt><dd className="mono">v{config?.version}</dd>
               <dt>Agent ID</dt><dd><CopyId id={agent.id} /></dd>
-              {Object.entries(agent.metadata).map(([k, v]) => (
-                <><dt key={k}>{k}</dt><dd key={`${k}-v`}>{String(v)}</dd></>
-              ))}
+              <dt>Owner</dt><dd>{String(config?.metadata?.owner_team ?? '—')}</dd>
+              <dt>Repos</dt>
+              <dd className="small">
+                {config?.metadata?.include_all_repository_aliases_by_default
+                  ? 'all catalog repositories'
+                  : (config?.metadata?.default_repository_aliases ?? []).join(', ') || 'none by default'}
+              </dd>
+              <dt>Notify</dt>
+              <dd className="small">{(config?.metadata?.notification_defaults ?? []).map((n) => n.type).join(', ') || '—'}</dd>
             </dl>
           </div>
 
           <div className="card">
-            <h2>Version history</h2>
-            {(versions?.data ?? []).map((v) => (
-              <div key={v.version}
-                style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--line-2)', fontSize: 13 }}>
-                <span className="mono">v{v.version}{v.version === agent.version && <span className="muted"> · current</span>}</span>
-                <span className="muted small">{shortDateTime(v.updated_at)}</span>
-              </div>
-            ))}
+            <h2>Skills</h2>
+            {(config?.skills ?? []).map((s) => {
+              const sid = skillId(s);
+              return <div key={sid} style={{ padding: '4px 0' }}><Link to={`/library#skill-${sid}`}>{sid}</Link></div>;
+            })}
+            {(config?.skills ?? []).length === 0 && <div className="muted small">No skills attached.</div>}
           </div>
 
           <div className="card">
-            <h2>Environments</h2>
-            <div className="muted small">
-              Sessions for this agent can run in{' '}
-              {[...envIndex.values()].join(', ') || 'no environments yet'}.
-            </div>
+            <h2>Tools</h2>
+            {(config?.tools ?? []).map((t) => {
+              const name = toolName(t);
+              return (
+                <div key={name} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                  <Link to={`/library#tool-${name}`} className="mono small">{name}</Link>
+                  <StatusChip status="active" />
+                </div>
+              );
+            })}
+            {(config?.tools ?? []).length === 0 && <div className="muted small">No custom tools.</div>}
           </div>
         </div>
       </div>

@@ -1,0 +1,50 @@
+type: json_schema
+name: anomaly_report
+schema:
+  type: object
+  additionalProperties: false
+  required:
+    - title
+    - summary
+    - anomaly_detected
+    - findings
+    - query_proof
+    - recommended_actions
+    - severity
+    - confidence
+  properties:
+    title:
+      type: string
+      minLength: 1
+    summary:
+      type: string
+      minLength: 1
+    anomaly_detected:
+      type: boolean
+    findings:
+      type: array
+      items:
+        type: object
+        additionalProperties: false
+        required: [metric, observation]
+        properties:
+          metric:
+            type: string
+          observation:
+            type: string
+          driver:
+            type: string
+    query_proof:
+      type: array
+      items:
+        type: string
+    recommended_actions:
+      type: array
+      items:
+        type: string
+    severity:
+      type: string
+      enum: [low, medium, high]
+    confidence:
+      type: string
+      enum: [low, medium, high]

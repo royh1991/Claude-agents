@@ -1,0 +1,15 @@
+type: custom
+name: file_list
+description: |
+  List a workspace-relative directory. Returns at most 500 entries and
+  blocks `.git` paths.
+permission_policy:
+  type: always_allow
+input_schema:
+  type: object
+  additionalProperties: false
+  required: [path]
+  properties:
+    path:
+      type: string
+      minLength: 1

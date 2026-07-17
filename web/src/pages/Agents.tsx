@@ -1,11 +1,10 @@
 import { Link, useNavigate } from 'react-router-dom';
-import { useFetch } from '../hooks';
-import type { Agent } from '../types';
+import { useCatalog } from '../hooks';
 import { ModelBadge, EmptyState } from '../components/bits';
-import { timeAgo } from '../format';
+import { modelId, toolName, skillId } from '../types';
 
 export function Agents() {
-  const { data, error } = useFetch<{ data: Agent[] }>('/v1/agents');
+  const { data: catalog, error } = useCatalog();
   const navigate = useNavigate();
 
   return (
@@ -13,43 +12,47 @@ export function Agents() {
       <div className="page-head">
         <div>
           <h1>Agents</h1>
-          <div className="sub">Reusable, versioned configurations: the model, system prompt, and connections each session runs with.</div>
+          <div className="sub">
+            Each agent is a YAML pack in the backend repo — the model, system prompt,
+            tools, skills, and output contract its runs use.
+          </div>
         </div>
         <div className="actions">
           <Link to="/agents/new" className="btn primary">Create agent</Link>
         </div>
       </div>
 
-      {error && <div className="alert error">Couldn't load agents: {error}</div>}
+      {error && <div className="alert error">Couldn't load the catalog: {error}</div>}
       <div className="card table-card">
-        {data && data.data.length === 0 ? (
+        {catalog && catalog.agents.length === 0 ? (
           <EmptyState glyph="◈">
-            No agents yet. <Link to="/agents/new">Create your first agent</Link> to define what it does and which connections it can use.
+            No agent packs found under <span className="mono">agents/</span>.
+            <Link to="/agents/new"> Create the first one</Link>.
           </EmptyState>
         ) : (
           <table className="list">
             <thead>
               <tr>
-                <th>Name</th>
+                <th>Agent</th>
                 <th>Model</th>
                 <th>Version</th>
-                <th>Connections</th>
-                <th className="right">Updated</th>
+                <th>Skills</th>
+                <th>Tools</th>
+                <th>Owner</th>
               </tr>
             </thead>
             <tbody>
-              {(data?.data ?? []).map((agent) => (
+              {(catalog?.agents ?? []).map((agent) => (
                 <tr key={agent.id} className="rowlink" onClick={() => navigate(`/agents/${agent.id}`)}>
                   <td>
-                    <div className="primary">{agent.name}</div>
-                    <div className="muted small">{agent.description}</div>
+                    <div className="primary">{agent.config?.name ?? agent.id}</div>
+                    <div className="muted small">{agent.config?.description ?? agent.parse_error ?? ''}</div>
                   </td>
-                  <td><ModelBadge model={agent.model} /></td>
-                  <td className="mono muted">v{agent.version}</td>
-                  <td className="muted small">
-                    {agent.mcp_servers.map((s) => s.name).join(', ') || '—'}
-                  </td>
-                  <td className="right muted" title={agent.updated_at}>{timeAgo(agent.updated_at)}</td>
+                  <td><ModelBadge id={modelId(agent.config?.model)} /></td>
+                  <td className="mono muted">v{agent.config?.version ?? '?'}</td>
+                  <td className="muted small">{(agent.config?.skills ?? []).map(skillId).join(', ') || '—'}</td>
+                  <td className="muted small">{(agent.config?.tools ?? []).map(toolName).join(', ') || '—'}</td>
+                  <td className="muted small">{String(agent.config?.metadata?.owner_team ?? '—')}</td>
                 </tr>
               ))}
             </tbody>

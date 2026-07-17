@@ -1,0 +1,17 @@
+type: environment
+id: airflow-triage-runtime
+name: Airflow triage runtime
+description: >-
+  The self-hosted agent runtime: a KubernetesPodOperator pod launched by the
+  ai-agent-runner DAG into the airflow namespace, inside the VPC. Secrets are
+  injected from Vault via pod annotations; networking is limited to
+  in-VPC services and GitHub.
+dag_id: ai-agent-runner
+workspace_root: /workspace
+kubernetes:
+  namespace: airflow
+  service_account: airflow
+secrets:
+  source: vault
+  definition: credible-bi-airflow-triage-config-secrets
+networking: vpc_limited

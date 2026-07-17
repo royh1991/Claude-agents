@@ -1,5 +1,12 @@
 # Gantry — a managed agent console for the data platform
 
+> **Status note (post-pivot):** Gantry now fronts the real
+> `credible-bi-airflow-triage` backend — see the README for the current
+> architecture (catalog reader + YAML publisher + Airflow run proxy). §1–§2
+> below document the original research and the design-token system, both of
+> which still govern the console's look and feel. The invented control-plane
+> API described further down was replaced by the backend's contract.
+
 Gantry is a bring-your-own-model reproduction of the Claude Managed Agents
 console experience. It keeps the platform's *shape* — agents, environments,
 sessions, events, scheduled deployments — and swaps the execution story:
