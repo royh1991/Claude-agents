@@ -15,26 +15,19 @@ schema:
   properties:
     title:
       type: string
-      minLength: 1
     summary:
       type: string
-      minLength: 1
     anomaly_detected:
       type: boolean
     findings:
       type: array
       items:
-        type: object
-        additionalProperties: false
-        required: [metric, observation]
-        properties:
-          metric:
-            type: string
-          observation:
-            type: string
-          driver:
-            type: string
+        type: string
     query_proof:
+      type: array
+      items:
+        type: string
+    evidence:
       type: array
       items:
         type: string

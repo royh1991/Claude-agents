@@ -166,6 +166,7 @@ test('fixture trigger YAMLs are valid schema v2 and load in the catalog', async 
   }
   const anomaly = cat.triggers.find((t) => t.id === 'submissions-output-anomaly');
   assert.equal(anomaly.config.fire.when, 'asset_updated');
+  assert.deepEqual(anomaly.config.fire.assets, ['credible_analytics_production.dbt_prod.submissions_output']);
   assert.deepEqual(anomaly.config.only_if, [{ type: 'dbt_failed_nodes', present: false }]);
   const triage = cat.triggers.find((t) => t.id === 'dbt-core-failure-triage');
   assert.equal(triage.config.fire.when, 'dag_complete');

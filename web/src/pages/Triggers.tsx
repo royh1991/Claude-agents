@@ -152,9 +152,12 @@ export function Triggers() {
 
       <div className="alert info">
         Trigger YAML is <span className="mono">schema_version: 2</span> — a proposal until it's
-        reconciled with <span className="mono">managed_agent_frontend.md</span> in the backend repo.
-        Conditions matter: a dbt task can go green while <span className="mono">run_results.json</span>
-        {' '}contains failures, so "DAG completed" and "build was clean" are separate facts.
+        reconciled with <span className="mono">managed_agent_frontend.md</span>. Conditions matter: a
+        dbt task can go green while <span className="mono">run_results.json</span> contains failures,
+        so "DAG completed" and "build was clean" are separate facts. <strong>Not yet executable:</strong>{' '}
+        no backend consumer reads <span className="mono">agent_triggers/</span> yet — the router and
+        scheduler DAGs, plus dbt asset outlets for asset triggers, are pending backend work.
+        Publishing declares intent for that work to consume.
       </div>
 
       {published && (

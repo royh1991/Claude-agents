@@ -11,3 +11,8 @@ unset, it falls back to this fixture so the console runs standalone.
 
 File shapes follow the backend contract (CLAUDE.md §8). If the real backend
 diverges, fix this fixture to match the backend — never the other way around.
+In particular: response format fields like `evidence`, `findings`,
+`failed_nodes`, and `query_proof` are **arrays of plain strings** in the
+backend schemas. Mocks must conform to these schemas, not vice versa.
+Byte-level verification against a real checkout is still pending — when the
+backend repo is available, diff these files against it and take its side.

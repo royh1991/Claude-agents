@@ -4,13 +4,16 @@ id: submissions-output-anomaly
 description: >-
   Scan submissions_output for anomalies whenever the asset materializes
   (Airflow 3 asset event). Skips runs where the producing build had failed
-  nodes — anomaly detection on a broken build is noise.
+  nodes — anomaly detection on a broken build is noise. NOT YET EXECUTABLE:
+  the dbt DAGs do not declare asset outlets yet; the asset name below is the
+  warehouse relation and must match the outlet the backend declares (which
+  should also carry the run's artifact S3 prefix in the asset event extra).
 agent:
   id: anomaly-detector
 fire:
   when: asset_updated
   assets:
-    - snowflake://analytics/submissions_output
+    - credible_analytics_production.dbt_prod.submissions_output
 only_if:
   - type: dbt_failed_nodes
     present: false

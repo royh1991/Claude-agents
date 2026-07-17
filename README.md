@@ -53,8 +53,9 @@ Configuration (all optional — sensible dev defaults):
 | `BACKEND_REPO_ROOT` | Path to a `credible-bi-airflow-triage` checkout | bundled `backend-fixture/` |
 | `BACKEND_PACKAGE_DIR` | Package dir inside that repo | `dags/credible_bi_airflow_triage` |
 | `AIRFLOW_BASE_URL` | Airflow webserver URL; unset = **mock run mode** | unset |
-| `AIRFLOW_USERNAME` / `AIRFLOW_PASSWORD` | Basic auth for the Airflow REST API | — |
-| `AIRFLOW_TOKEN` | Bearer token alternative | — |
+| `AIRFLOW_API_VERSION` | `v2` (Airflow 3, JWT), `v1` (Airflow 2, basic), or auto-probe | auto |
+| `AIRFLOW_USERNAME` / `AIRFLOW_PASSWORD` | v1: basic auth; v2: exchanged for a JWT at `/auth/token` | — |
+| `AIRFLOW_TOKEN` | Pre-minted bearer/JWT alternative | — |
 | `AIRFLOW_DAG_ID` | The runner DAG id | `ai-agent-runner` |
 
 Without `AIRFLOW_BASE_URL` the console simulates runs (same task graph,

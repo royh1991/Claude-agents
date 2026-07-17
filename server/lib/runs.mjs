@@ -76,30 +76,77 @@ export function validateSessionEnvelope(envelope, catalog) {
 
 // ------------------------------------------------------------- Airflow
 
+// Version-aware: Airflow 3 serves the stable REST API at /api/v2 with JWT
+// auth (token minted by the auth manager at /auth/token); Airflow 2 serves
+// /api/v1 with basic auth. AIRFLOW_API_VERSION pins it ('v1' | 'v2');
+// 'auto' (default) probes once and caches. Endpoint paths and bodies are
+// identical across both for everything this adapter does.
 export class AirflowAdapter {
   constructor(env = process.env) {
     this.base = env.AIRFLOW_BASE_URL.replace(/\/$/, '');
     this.dagId = env.AIRFLOW_DAG_ID ?? 'ai-agent-runner';
-    this.headers = { 'content-type': 'application/json' };
-    if (env.AIRFLOW_TOKEN) {
-      this.headers.authorization = `Bearer ${env.AIRFLOW_TOKEN}`;
-    } else if (env.AIRFLOW_USERNAME) {
-      const cred = Buffer.from(`${env.AIRFLOW_USERNAME}:${env.AIRFLOW_PASSWORD ?? ''}`).toString('base64');
-      this.headers.authorization = `Basic ${cred}`;
-    }
+    this.username = env.AIRFLOW_USERNAME ?? null;
+    this.password = env.AIRFLOW_PASSWORD ?? '';
+    this.staticToken = env.AIRFLOW_TOKEN ?? null;
+    const pinned = env.AIRFLOW_API_VERSION;
+    this.version = pinned === 'v1' || pinned === 'v2' ? pinned : null;
+    this.jwt = null;
   }
 
   get mode() { return 'airflow'; }
 
-  async #call(method, pathname, body) {
-    const res = await fetch(`${this.base}/api/v1${pathname}`, {
+  async #resolveVersion() {
+    if (this.version) return this.version;
+    try {
+      // /api/v2 exists only on Airflow 3; a 404 here means Airflow 2.
+      const res = await fetch(`${this.base}/api/v2/monitor/health`);
+      this.version = res.status === 404 ? 'v1' : 'v2';
+    } catch {
+      this.version = 'v2';
+    }
+    return this.version;
+  }
+
+  async #authHeader(version, forceRefresh = false) {
+    if (this.staticToken) return `Bearer ${this.staticToken}`;
+    if (!this.username) return null;
+    if (version === 'v1') {
+      return `Basic ${Buffer.from(`${this.username}:${this.password}`).toString('base64')}`;
+    }
+    if (!this.jwt || forceRefresh) {
+      const res = await fetch(`${this.base}/auth/token`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: this.username, password: this.password }),
+      });
+      if (!res.ok) {
+        const err = new Error(`Airflow auth token request failed: ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
+      this.jwt = (await res.json()).access_token;
+    }
+    return `Bearer ${this.jwt}`;
+  }
+
+  async #call(method, pathname, body, retried = false) {
+    const version = await this.#resolveVersion();
+    const headers = { 'content-type': 'application/json' };
+    const auth = await this.#authHeader(version);
+    if (auth) headers.authorization = auth;
+    const res = await fetch(`${this.base}/api/${version}${pathname}`, {
       method,
-      headers: this.headers,
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+    if (res.status === 401 && version === 'v2' && !this.staticToken && !retried) {
+      // Expired JWT: mint a fresh one and retry once.
+      await this.#authHeader(version, true);
+      return this.#call(method, pathname, body, true);
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      const err = new Error(`Airflow ${method} ${pathname} → ${res.status}: ${text.slice(0, 300)}`);
+      const err = new Error(`Airflow ${method} /api/${version}${pathname} → ${res.status}: ${text.slice(0, 300)}`);
       err.status = res.status;
       throw err;
     }
@@ -206,14 +253,23 @@ export function instanceFromSchema(schema, seedText = 'Mock value') {
   }
 }
 
+// Mock outputs conform to the BACKEND's response format schemas (evidence,
+// findings, etc. are arrays of strings — see the fixture schemas). The mock
+// bends to the schema, never the schema to the mock.
 const MOCK_RESULTS = {
   failure_triage_report: (conf) => ({
     title: `Triage: ${conf.metadata?.dag_id ?? 'dw_core_load'} failed at ${conf.metadata?.task_id ?? 'load_fct_orders'}`,
     summary: "Today's orders export contains the literal string 'N/A' in amount; COPY INTO fct_orders_stage fails with Snowflake error 100038. Yesterday's load on the same code succeeded, so this is an upstream export regression, not a warehouse change.",
     root_cause_hypothesis: 'Checkout release v214 changed the orders export serializer to emit N/A for null amounts.',
+    findings: [
+      "412 rows in today's partition have non-numeric amount; zero rows yesterday",
+      'The failing file is orders_part-0007.csv.gz, first bad row at line 18422',
+    ],
+    failed_nodes: ['model.credible_dbt.fct_orders_stage'],
+    related_files: ['models/staging/fct_orders_stage.sql'],
     evidence: [
-      { source: 'task log attempt=2', detail: "snowflake.connector 100038 (22018): Numeric value 'N/A' is not recognized in column AMOUNT, file orders_part-0007.csv.gz line 18422" },
-      { source: 'stage query', detail: '412 rows in today\'s partition have non-numeric amount; zero rows yesterday' },
+      "task log attempt=2: snowflake.connector 100038 (22018): Numeric value 'N/A' is not recognized in column AMOUNT",
+      'stage query: SELECT COUNT(*) over @raw.orders_landing/today WHERE TRY_TO_NUMBER(amount) IS NULL → 412',
     ],
     recommended_actions: [
       'Ask the orders service team to revert the export serializer change (v214).',
@@ -227,8 +283,8 @@ const MOCK_RESULTS = {
     summary: 'refund_rate for the latest close is z = 3.6 against the 28-day weekday baseline; all other core metrics are within 1.2 MAD of baseline.',
     anomaly_detected: true,
     findings: [
-      { metric: 'refund_rate', observation: '4.1% vs 1.9% weekday baseline (z = 3.6), sustained across the full day', driver: 'web platform, NA region — 82% of the excess' },
-      { metric: 'gross_revenue', observation: 'within baseline (z = 0.4)' },
+      'refund_rate: 4.1% vs 1.9% weekday baseline (z = 3.6), sustained across the full day — driver: web platform, NA region (82% of the excess)',
+      'gross_revenue: within baseline (z = 0.4)',
     ],
     query_proof: [
       "SELECT metric, ds, value FROM analytics.metric_daily WHERE ds >= DATEADD('day', -35, CURRENT_DATE)",
