@@ -671,7 +671,7 @@ A pure-code generator (no LLM) runs on every merge to the dbt repo and materiali
 | --- | --- | --- |
 | merge to dbt repo (CI) | code, no LLM | regenerate L0; drift diff; validator + deterministic lint gate |
 | dbt run failure (`dag_complete` + `only_if: dbt_failed_nodes`) | triage agent | read-only consumption (already wired in this backend) |
-| after triage/anomaly runs | absorb agent (single writer) | crystallize run → incident page draft + updates to affected pages, on a branch; deterministic verify; PR |
+| after triage/anomaly runs | absorb agent (single writer) | crystallize run → incident page draft + updates to affected pages, on a branch; deterministic verify; changes classified auto-approvable vs held with typed hold reasons; PR |
 | weekly (`schedule` trigger) | compile agent | batch-absorb merged PRs/postmortems; reconcile contradictions → conflict pages; refresh stale-checksum pages only |
 | weekly/monthly | lint + probe suite | deterministic lint; WiCER-style probes mined from past incidents replayed against the wiki; failures → preservation constraints in the compile prompt (Error-Book pattern) |
 | quarterly | humans | review `contested`/`hypothesis` pages; promote/demote; prune cold pages (LRU demotion, never deletion) |
@@ -690,44 +690,96 @@ convention. The backend repo gains one skill and one tool; the Gantry console ne
 changes (the Library page will simply show the new skill; a knowledge-browser page is a
 possible later addition).
 
-**Phase 0 — deterministic only (1-2 days of work, immediate value):**
+Design rule inherited from llmwiki (§4.3): **the domain contract is data, and every
+write surface enforces it fail-closed.** One profile file governs the validator, the
+generator, the absorb agent's write tool, and CI — there is no path into `knowledge/`
+that skips it, and PR approval is not a bypass because CI re-validates the final PR
+state against the current profile (llmwiki's "review approval re-plans the write"
+rule, implemented as branch protection).
+
+**Phase 0 — deterministic lineage tools (1-2 days of work, immediate value):**
 `knowledge/bin/wikictl` (Python, stdlib + manifest.json): `node`, `lineage --up/--down
 --depth N`, `impact <id>` (descendants ranked by exposure maturity/owner/meta
-criticality), `exposures <id>`, `diff <old-manifest>`. Wire as a backend tool
-(`tools/wiki_query.yaml`, SELECT-free, read-only) and extend `skills/dbt.md`: "for
-blast radius, call wikictl impact; never infer lineage from SQL." **This alone closes
-most of the severity-classification gap** — before any wiki exists.
+criticality), `exposures <id>`, `diff <old-manifest>`, and `resolve <name>` — alias
+resolution mapping dashboard titles, exposure labels, and colloquial model names to
+`unique_id`s via a generated `aliases.json` (seeded from exposure labels/urls and model
+`meta.aliases`; the llmwiki `aliases:` mechanism, tried before any LLM entity
+resolution). Wire as a backend tool (`tools/wiki_query.yaml`, SELECT-free, read-only)
+and extend `skills/dbt.md`: "for blast radius, call wikictl impact; never infer lineage
+from SQL." **This alone closes most of the severity-classification gap** — before any
+wiki exists.
 
-**Phase 1 — L0 projection + CI:** generator renders cards/routing indexes/registry to
-`knowledge/generated/` (gitignored or committed — committed preferred for auditability);
-CI job on merge regenerates + runs the ~150-line validator; drift report as a CI
-annotation. Seed `knowledge/wiki/domains/<domain>.md` pages (one per top-level dbt
-folder) with `@generated` skeletons + empty curated blocks.
+**Phase 1 — the contract, L0 projection, and CI:**
 
-**Phase 2 — absorb loop:** new agent pack `agents/wiki-absorb/agent.yaml` (single
-writer), triggered `dag_complete` after triage runs and weekly `schedule`: crystallize
-each triage result envelope into `knowledge/wiki/incidents/INC-<date>-<slug>.md`
+- `knowledge/profile.json` (pure data, no code — the CLP pattern): entity types mapped
+  to directories (`Domain | Model | Concept | Incident | Playbook | Query`); required
+  frontmatter fields and types per entity; the relation vocabulary **with endpoint
+  constraints** (`caused_by: Incident → Model|Source`, `documents: Playbook →
+  Model|Domain`, `computes_same_metric_as: Model → Model`, `supersedes: same-type`,
+  `contradicts: any`) so invalid edges "do not quietly gain authority"; the lifecycle
+  FSM `stub → draft → verified → superseded` with **gated transitions** — an Incident
+  cannot reach `verified` without a `run_results` invocation id and ≥1 `caused_by`
+  relation; a Model page cannot reach `verified` without an owner and a fresh
+  `manifest_checksum`; and content rules (lineage prose banned everywhere).
+- `knowledge/bin/validate` (~200 lines): OKF's 3 conformance rules + profile
+  enforcement + manifest-aware checks. Staleness is **ownership-based** (llmwiki's
+  `state.json` design, sourced from the manifest instead): every page's `resource`
+  list is its owned node set; fresh/stale/orphaned is computed per page from owned-node
+  checksums, and `wikictl stale` lists exactly the pages needing recompile.
+- Generator renders cards/routing indexes/`registry.json`/`backlinks.json`/
+  `aliases.json` to `knowledge/generated/` (committed, for auditability); CI on every
+  PR touching `models/` or `knowledge/` regenerates, runs the validator fail-closed,
+  and posts the drift report as an annotation. Seed
+  `knowledge/wiki/domains/<domain>.md` pages (one per top-level dbt folder) with
+  `@generated` skeletons + empty curated blocks — the profile's seed-page declaration,
+  with per-kind minimum-wikilink counts linted from day one.
+
+**Phase 2 — absorb loop with a typed review queue:** new agent pack
+`agents/wiki-absorb/agent.yaml` (the single writer), triggered `dag_complete` after
+triage runs and weekly `schedule`. It crystallizes each triage **result envelope plus
+the run's tool-call trajectory** (the `ingest-session` pattern — the trajectory is a
+source, not just the conclusion) into `knowledge/wiki/incidents/INC-<date>-<slug>.md`
 (structured: failed nodes by unique_id, root cause, blast radius decided, severity,
-smallest fix, lesson), update affected domain/model pages' `## Incident history`
-(append-only, dated, cited), branch + PR. Absorb ledger
-(`knowledge/meta/absorbed.json`) keyed by run invocation_id for idempotence across
-Airflow retries.
+smallest fix, lesson) and appends dated, cited entries to affected pages'
+`## Incident history`, on a branch. The PR carries a machine-readable
+`knowledge/meta/candidates.json` classifying every page change with llmwiki's
+hold-reason taxonomy: `auto-approvable` (a dated, sourced fact appended to a
+`verified` page — the R&D World autonomy boundary) vs held as `low-confidence`,
+`contradicted` (both positions noted per the Hermes protocol, never resolved by the
+agent), `schema-violating`, or `provenance-violating` (uncited claim). Rejected
+candidates move to `knowledge/meta/candidates/archive/` for audit. The absorb ledger
+(`knowledge/meta/absorbed.json`, keyed by run invocation_id) keeps ingestion
+exactly-once across Airflow retries.
 
-**Phase 3 — consumption discipline:** `skills/dbt-wiki.md` skill encoding §7 L2
-(deterministic-first routing, page budget, false-absence guard, citation of wiki pages
-in triage reports by path). Add `knowledge_search` tool only if grep over routing
-indexes proves insufficient (expected: it won't, below ~500 pages; QMD is the
-escape hatch, already CLI+MCP).
+**Phase 3 — consumption discipline and context packs:** `skills/dbt-wiki.md` encodes
+§7 L2 (deterministic-first routing, ≤3-5 pages, ~15-call budget, the false-absence
+guard, `wikictl resolve` before declaring a name unknown, wiki pages cited by path in
+triage reports). Add `wikictl context <failed-node-ids…> [--budget-bytes N]` — the
+per-incident **evidence pack**, assembled deterministically: node cards + nearest
+exposures + backlinked pages (`verified` first, `hypothesis` labeled) + most recent
+incidents for those nodes, under a hard byte budget. The pack is *pulled in-pod at run
+start*, which is how the 60 kB session-envelope cap stays irrelevant to context depth.
+Pages-read go into the run's result metadata; the absorb agent (not the read-only run)
+writes them to the access log that later drives LRU demotion. A `knowledge_search`
+tool is added only if grep over routing indexes proves insufficient (expected: it
+won't below ~500 pages; QMD is the escape hatch, already CLI+MCP).
 
-**Phase 4 — quality machinery:** probe suite from the first N incidents ("what does the
-wiki need to answer for this incident to have been triaged right?") run weekly;
-Error-Book file of compile-prompt constraints; quarterly human review cadence;
-per-type staleness thresholds.
+**Phase 4 — quality machinery and distillation:** weekly probe suite mined from past
+incidents ("what must the wiki answer for this incident to have been triaged right?"),
+failures re-injected as compile-prompt preservation constraints (WiCER + Error-Book);
+per-type staleness half-lives declared in the profile (incident facts never stale;
+model business meaning reviewed 6-12 months; vendor-flakiness notes decay fast);
+quarterly human review of `contested`/`hypothesis` pages; LRU demotion from routing
+indexes fed by the access log. Recurring trajectories across incidents get distilled
+into `playbooks/` pages (pi-llm-wiki's skill distillation), and playbooks that stop
+changing graduate into backend `skills/` catalog entries or dbt tests — the
+codification gradient: the wiki is the staging area for what becomes deterministic.
 
-Rollout metric (the R&D World lesson — watch maintenance ≈ savings): track per-run
-pages read, wiki citations per triage report, severity-classification corrections by
-humans, and absorb-PR review time. If review time grows past triage time saved, shrink
-the page population, not the pipeline.
+Rollout metrics (the R&D World lesson — watch maintenance ≈ savings): per-run pages
+read, wiki citations per triage report, severity-classification corrections by humans,
+absorb-PR review time, and the candidate mix (auto-approved vs held vs rejected — a
+rising held rate means the compile prompts or the profile need work). If review time
+grows past triage time saved, shrink the page population, not the pipeline.
 
 ## 9. What not to build (anti-patterns, each observed failing)
 
