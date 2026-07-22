@@ -353,6 +353,61 @@ to a hosted product (grok-wiki.com) — snapshot-oriented generation with diagra
 but no incremental story; useful as an onboarding artifact, not as a maintained context
 layer.
 
+### 4.3 llmwiki (`atomicstrata/llm-wiki-compiler`): the reference implementation, in detail
+
+One tool deserves a deeper treatment because it is the closest existing embodiment of
+the §7 architecture — read here beyond the README, into its wiki-model and
+Configurable Lifecycle Profiles (CLP) docs:
+
+- **Incremental compilation via ownership**: `.llmwiki/state.json` tracks per-source
+  SHA-256 hashes **and the concept slugs each source owns**; every page's `sources:`
+  frontmatter plus those hashes determine fresh/stale/orphaned per page, so
+  `refresh --stale` recompiles only the changed owners. (Our L0 gets the same result
+  from manifest node `checksum` — the design is validated, the implementation is free.)
+- **A typed review queue with named hold reasons**: pages are held as candidates for
+  exactly one of `low-confidence`, `contradicted`, `schema-violating`,
+  `provenance-violating`, or `imported-from-OKF`; rejected candidates are archived for
+  audit. This is the shape our absorb pipeline's PR annotations should take.
+- **Profile-as-data, enforced at every write surface**: a CLP profile
+  (`.llmwiki/profile.json`, pure data — "profiles cannot ship code") declares entity
+  types (mapped to directories), required frontmatter fields with types, valid relation
+  types **with valid endpoint entity types** ("invalid edges do not quietly gain
+  authority"), lifecycles as finite-state machines over one frontmatter field, and
+  gated states requiring evidence fields/relation counts/hash-pinned artifacts. The
+  core invariant: "domain behavior comes from profile data, not from hardcoded
+  branches… it either applies the generic operation or **fails closed**." Crucially,
+  validation runs at *all* write surfaces — typed writes, lifecycle transitions,
+  relation writes, artifact writes, and **review approval itself re-plans the write
+  against the current profile** — so the review queue cannot be used to bypass rules.
+  A dbt-triage profile falls straight out of this: entities `Domain | Model | Concept |
+  Incident | Playbook`, lifecycle `stub → draft → verified → superseded`, relation
+  endpoint constraints (e.g. `caused_by: Incident → Model`), and a gate like "an
+  Incident cannot reach `verified` without a `run_results` invocation id and ≥1
+  affected-model relation."
+- **`schema.json` seed pages + per-kind minimum wikilink counts** — the compiler
+  materializes declared domain-overview pages (our seeded domain skeletons) and lints
+  connectivity per page kind.
+- **Frontmatter `aliases:` resolved everywhere** (viewer, MCP `read_page`, query) —
+  the lightweight answer to the fuzzy-name boundary (§3.7): dashboard names and
+  colloquial model names become aliases on the canonical page.
+- **`ingest-session`** imports exported Claude/Codex/Cursor sessions as sources —
+  trajectory ingestion (§3.6) as a first-class command — and
+  **`context "<task>" --json` / MCP `get_context_pack`** builds a citation-aware
+  evidence pack per task: the per-incident frame, productized. Its retrieval keeps a
+  local `embeddings.json` (page- and chunk-level, incrementally re-embedded only for
+  changed chunks) as an internal detail of query/context — no hosted vector infra, and
+  read-only MCP tools work without any provider credentials.
+- **Honest OKF exchange**: imports are review-gated by default (`--trusted` to bypass),
+  imported pages carry `provenanceState: imported` plus an `x-okf` snapshot of original
+  frontmatter, and re-export preserves foreign producer keys.
+
+What we would *not* adopt: it is a Node 24+ CLI compiling from unstructured sources —
+our Pass 1 is the manifest, our runtime is Python/Airflow, and our write path is a PR.
+The value is the contract design: profile-as-data validation, the hold-reason taxonomy,
+ownership-based staleness, and gates enforced at write time rather than by prompt
+convention. Those four ideas transfer directly into the §8 validator and absorb
+pipeline.
+
 ---
 
 ## 5. The evidence: what benchmarks and production papers actually show
@@ -774,7 +829,7 @@ restatement of the gist).
 | knowledge-worker | **skim** — §3 (provenance-or-bust, review-before-merge) |
 | vault-curator | **skim** — §3 (fill-only-missing enrichment, MOC indexes) |
 | llm-wiki-tools | **skim** — §3 (concept-oriented pages, surgical patches, read/manage CLI split) |
-| llm-wiki-compiler (atomicstrata) | **deep** — §3.4/§4.2 (strongest reference implementation: lifecycle profiles, fail-closed gates, line-range citations, stale-only refresh, eval harness) |
+| llm-wiki-compiler (atomicstrata; listed as atomicmemory, since renamed) | **deep** — §3.4/§4.2/§4.3 (strongest reference implementation; README + wiki-model + CLP docs read: profile-as-data with fail-closed write-surface enforcement, typed review-hold taxonomy, ownership-based staleness, line-range citations, stale-only refresh, eval harness, context packs, session ingestion) |
 | OpenKB (PageIndex) | **deep** — §3.6 (vectorless tree retrieval, Skill Factory) |
 | mykg | **deep** — frozen-ontology two-pass extraction + review gate; informs the §7 design stance |
 | hippocampus | **deep** — §4.1 (OKF-adjacent template in practice: hot.md, content_hash, read discipline) |
